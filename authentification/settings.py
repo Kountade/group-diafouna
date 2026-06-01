@@ -25,7 +25,12 @@ SECRET_KEY = "django-insecure-p6y&*%7&^suvs2fg6cgw2vuunjszq6(^4nw0h*cnri33ze2%!6
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+
+ALLOWED_HOSTS = ["group-diafouna-backend.onrender.com",
+                 "localhost", "127.0.0.1"]
+CSRF_TRUSTED_ORIGINS = ['https://group-diafouna-backend.onrender.com',
+                        'https://group-diafouna-backend.onrender.com',]
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 
 # Application definition
@@ -51,13 +56,14 @@ MIDDLEWARE = [
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
-    "django.middleware.clickjacking.XFrameOptionsMiddleware",  
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "corsheaders.middleware.CorsMiddleware",
 ]
 
+
 CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOWED_ORIGINS = [
-    "https://ba-souleymane-fils-backe.onrender.com",
+    "https://group-diafouna-backend.onrender.com",
     "http://localhost:3000",
     "http://127.0.0.1:3000",
 ]
