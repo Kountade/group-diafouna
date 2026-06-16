@@ -1,9 +1,13 @@
+
+from django.contrib import admin
+from django.urls import path
 from rest_framework.routers import DefaultRouter
-from .views import PartnerViewSet, AccountViewSet, TransactionViewSet
+from .views import *
 
 router = DefaultRouter()
-router.register(r'partners', PartnerViewSet, basename='partner')
-router.register(r'accounts', AccountViewSet, basename='account')
-router.register(r'transactions', TransactionViewSet, basename='transaction')
+router.register('partners', PartnerViewSet, basename='partner')
+router.register('accounts', AccountViewSet, basename='account')
+router.register('transactions', TransactionViewSet, basename='transaction')
+
 
 urlpatterns = router.urls
