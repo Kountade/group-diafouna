@@ -1,3 +1,4 @@
+# users/serializers.py
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from .models import CustomUser
@@ -17,7 +18,8 @@ class RegisterSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ('id', 'email', 'password', 'role')
+        fields = ('id', 'email', 'password', 'role', 'first_name', 'last_name',
+                  'username', 'phone_number', 'address', 'birthday')
         extra_kwargs = {
             'password': {'write_only': True},
             'role': {'required': False}
@@ -25,7 +27,7 @@ class RegisterSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         if 'role' not in validated_data:
-            validated_data['role'] = 'commercial'
+            validated_data['role'] = 'agent'
         user = User.objects.create_user(**validated_data)
         return user
 
@@ -35,8 +37,10 @@ class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = (
-            'id', 'email', 'username', 'role', 'department',
-            'phone', 'is_active', 'profile_picture', 'created_at'
+            'id', 'email', 'username', 'role', 'first_name', 'last_name',
+            'phone_number', 'address', 'birthday', 'is_active',
+            'profile_picture', 'created_at', 'last_login', 'is_online',
+            'date_joined'
         )
         read_only_fields = fields
 
@@ -46,23 +50,22 @@ class UserDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = '__all__'
-        read_only_fields = ('id', 'created_at', 'updated_at', 'last_login')
+        read_only_fields = ('id', 'created_at', 'updated_at',
+                            'last_login', 'date_joined')
 
 
 class UserWriteSerializer(serializers.ModelSerializer):
     """
     Sérialiseur pour la création et modification d'utilisateurs.
-    Permet de définir le mot de passe et tous les champs modifiables.
     """
     password = serializers.CharField(write_only=True, required=False)
 
     class Meta:
         model = User
         fields = [
-            'email', 'password', 'username', 'role', 'department',
-            'phone', 'address', 'city', 'country', 'postal_code',
-            'employee_id', 'hire_date', 'contract_type', 'salary',
-            'is_active', 'profile_picture', 'birthday'
+            'email', 'password', 'username', 'role',
+            'first_name', 'last_name', 'phone_number', 'address',
+            'birthday', 'is_active', 'profile_picture'
         ]
 
     def create(self, validated_data):
