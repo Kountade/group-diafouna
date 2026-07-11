@@ -1,3 +1,4 @@
+# finance/models.py
 from django.db import models
 from django.core.validators import MinValueValidator
 from decimal import Decimal
@@ -26,7 +27,6 @@ class Account(models.Model):
     
     account_type = models.CharField(max_length=10, choices=ACCOUNT_TYPES)
     
-    # Un compte appartient soit à un partenaire, soit à un agent, soit à personne (global)
     partner = models.OneToOneField(Partner, on_delete=models.CASCADE, null=True, blank=True)
     user = models.OneToOneField(User, on_delete=models.CASCADE, null=True, blank=True,
                                 limit_choices_to={'role': 'agent'})
@@ -55,6 +55,47 @@ class Account(models.Model):
             return f"Compte Partenaire - {self.partner.name}"
         return f"Compte Agent - {self.user.email}"
 
+
+class WithdrawalRecipient(models.Model):
+    """
+    Personne qui récupère l'argent lors d'un retrait partenaire
+    """
+    DOCUMENT_TYPES = (
+        ('cni', 'Carte Nationale d\'Identité'),
+        ('passport', 'Passeport'),
+        ('permis', 'Permis de Conduire'),
+        ('carte_sejour', 'Carte de Séjour'),
+        ('autre', 'Autre'),
+    )
+    
+    first_name = models.CharField(max_length=100, verbose_name="Prénom")
+    last_name = models.CharField(max_length=100, verbose_name="Nom")
+    email = models.EmailField(max_length=200, blank=True, null=True, verbose_name="Email")
+    phone = models.CharField(max_length=20, verbose_name="Téléphone")
+    document_type = models.CharField(max_length=20, choices=DOCUMENT_TYPES, default='cni', verbose_name="Type de pièce")
+    document_number = models.CharField(max_length=50, unique=True, verbose_name="Numéro de pièce")
+    address = models.TextField(blank=True, null=True, verbose_name="Adresse")
+    
+    # Informations supplémentaires
+    is_regular = models.BooleanField(default=True, verbose_name="Client régulier")
+    notes = models.TextField(blank=True, null=True, verbose_name="Notes")
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        verbose_name = "Bénéficiaire de retrait"
+        verbose_name_plural = "Bénéficiaires de retraits"
+        ordering = ['-created_at']
+    
+    def __str__(self):
+        return f"{self.first_name} {self.last_name} - {self.phone}"
+    
+    @property
+    def full_name(self):
+        return f"{self.first_name} {self.last_name}".strip()
+
+
 class Transaction(models.Model):
     TRANSACTION_TYPES = (
         ('deposit', 'Dépôt partenaire'),
@@ -69,6 +110,12 @@ class Transaction(models.Model):
     description = models.TextField(blank=True)
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='transactions_created')
     created_at = models.DateTimeField(auto_now_add=True)
+    
+    # Nouveaux champs pour les retraits
+    recipient = models.ForeignKey(WithdrawalRecipient, on_delete=models.SET_NULL, null=True, blank=True, 
+                                  related_name='transactions', verbose_name="Bénéficiaire du retrait")
+    recipient_phone = models.CharField(max_length=20, blank=True, null=True, verbose_name="Téléphone du bénéficiaire")
+    recipient_name = models.CharField(max_length=200, blank=True, null=True, verbose_name="Nom du bénéficiaire")
 
     def __str__(self):
         return f"{self.get_transaction_type_display()} - {self.amount} - {self.created_at}"
