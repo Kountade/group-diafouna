@@ -9,6 +9,8 @@ router.register('partners', PartnerViewSet, basename='partner')
 router.register('accounts', AccountViewSet, basename='account')
 router.register('transactions', TransactionViewSet, basename='transaction')
 # Ajoutez cette ligne pour les agents
-router.register('agents-balance', AgentBalanceViewSet, basename='agent-balance')
+router.register('agents-balance', AgentBalanceViewSet,
+                basename='agent-balance')
+router.register('recipients', WithdrawalRecipientViewSet, basename='recipient')
 
 urlpatterns = router.urls

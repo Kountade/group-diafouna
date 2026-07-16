@@ -995,7 +995,40 @@ class AgentBalanceViewSet(viewsets.ReadOnlyModelViewSet):
             "account_id": account.id if account else None,
             "currency": account.currency if account else 'XOF'
         })
+class WithdrawalRecipientViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet pour la gestion des bénéficiaires de retraits (CRUD complet)
+    """
+    serializer_class = WithdrawalRecipientSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    queryset = WithdrawalRecipient.objects.all().order_by('-created_at')
 
+    def get_queryset(self):
+        user = self.request.user
+        queryset = super().get_queryset()
+        # Filtrage par recherche (nom, téléphone, document…)
+        search = self.request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(first_name__icontains=search) |
+                Q(last_name__icontains=search) |
+                Q(phone__icontains=search) |
+                Q(document_number__icontains=search)
+            )
+        # Si l'utilisateur est agent, il ne peut voir que ses propres bénéficiaires ?
+        # Par défaut, on laisse tout voir (admin et agent). 
+        # Si vous voulez restreindre, vous pouvez ajouter un filtre par agent (mais il faut un champ agent sur le modèle)
+        return queryset
+
+    def get_permissions(self):
+        # Admin et agent peuvent tout faire
+        if self.request.user.role not in ['admin', 'agent']:
+            self.permission_classes = [permissions.IsAuthenticated]
+        return super().get_permissions()
+
+    def create(self, request, *args, **kwargs):
+        # On peut ajouter une validation supplémentaire si besoin
+        return super().create(request, *args, **kwargs)
 
 class StatisticsViewSet(viewsets.ViewSet):
     """
