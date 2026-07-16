@@ -57,7 +57,6 @@ class TransactionSerializer(serializers.ModelSerializer):
     to_account_type = serializers.CharField(source='to_account.account_type')
     created_by_email = serializers.EmailField(
         source='created_by.email', read_only=True)
-
     recipient_name = serializers.CharField(
         source='recipient.full_name', read_only=True)
     recipient_phone = serializers.CharField(
@@ -65,9 +64,26 @@ class TransactionSerializer(serializers.ModelSerializer):
     recipient_document = serializers.CharField(
         source='recipient.document_number', read_only=True)
 
+    # 👇 NOUVEAU champ pour le nom du partenaire
+    partner_name = serializers.SerializerMethodField()
+
     class Meta:
         model = Transaction
-        fields = '__all__'
+        fields = '__all__'  # ou listez explicitement les champs
+
+    def get_partner_name(self, obj):
+        """
+        Récupère le nom du partenaire :
+        - pour un dépôt (deposit) : le partenaire est le destinataire (to_account)
+        - pour un retrait (withdrawal) : le partenaire est l'émetteur (from_account)
+        - pour les autres types, on peut retourner None ou le nom si disponible
+        """
+        if obj.transaction_type == 'deposit' and obj.to_account and obj.to_account.account_type == 'partner':
+            return obj.to_account.partner.name if obj.to_account.partner else None
+        if obj.transaction_type == 'withdrawal' and obj.from_account and obj.from_account.account_type == 'partner':
+            return obj.from_account.partner.name if obj.from_account.partner else None
+        # Optionnel : pour les transferts entre agents, on peut mettre le nom de l'agent destinataire, etc.
+        return None
 
 
 class DepositSerializer(serializers.Serializer):
