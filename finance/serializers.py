@@ -1,4 +1,3 @@
-# finance/serializers.py
 from rest_framework import serializers
 from .models import Partner, Account, Transaction, WithdrawalRecipient
 
@@ -33,7 +32,6 @@ class AccountSerializer(serializers.ModelSerializer):
         return None
 
 
-# ✅ Correction : suppression de source='full_name'
 class WithdrawalRecipientSerializer(serializers.ModelSerializer):
     full_name = serializers.CharField(read_only=True)
 
@@ -43,7 +41,6 @@ class WithdrawalRecipientSerializer(serializers.ModelSerializer):
         read_only_fields = ('created_at', 'updated_at')
 
 
-# ✅ Correction : suppression de source='full_name'
 class WithdrawalRecipientSimpleSerializer(serializers.ModelSerializer):
     full_name = serializers.CharField(read_only=True)
 
@@ -56,16 +53,18 @@ class WithdrawalRecipientSimpleSerializer(serializers.ModelSerializer):
 class TransactionSerializer(serializers.ModelSerializer):
     from_account_type = serializers.CharField(
         source='from_account.account_type')
-    to_account_type = serializers.CharField(source='to_account.account_type')
+    to_account_type = serializers.CharField(
+        source='to_account.account_type')
     created_by_email = serializers.EmailField(
         source='created_by.email', read_only=True)
+    created_by_full_name = serializers.CharField(
+        source='created_by.get_full_name', read_only=True)
     recipient_name = serializers.CharField(
         source='recipient.full_name', read_only=True)
     recipient_phone = serializers.CharField(
         source='recipient.phone', read_only=True)
     recipient_document = serializers.CharField(
         source='recipient.document_number', read_only=True)
-
     partner_name = serializers.SerializerMethodField()
 
     class Meta:
@@ -137,15 +136,19 @@ class WithdrawalSerializer(serializers.Serializer):
         required=False, help_text="ID du bénéficiaire existant")
     recipient_first_name = serializers.CharField(
         required=False, max_length=100)
-    recipient_last_name = serializers.CharField(required=False, max_length=100)
-    recipient_phone = serializers.CharField(required=False, max_length=20)
-    recipient_email = serializers.EmailField(required=False, allow_blank=True)
+    recipient_last_name = serializers.CharField(
+        required=False, max_length=100)
+    recipient_phone = serializers.CharField(
+        required=False, max_length=20)
+    recipient_email = serializers.EmailField(
+        required=False, allow_blank=True)
     recipient_document_type = serializers.ChoiceField(
         choices=WithdrawalRecipient.DOCUMENT_TYPES, required=False
     )
     recipient_document_number = serializers.CharField(
         required=False, max_length=50)
-    recipient_address = serializers.CharField(required=False, allow_blank=True)
+    recipient_address = serializers.CharField(
+        required=False, allow_blank=True)
 
     def validate(self, data):
         if data.get('recipient_id'):

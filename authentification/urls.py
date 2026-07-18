@@ -7,6 +7,7 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('', include('users.urls')),
     path('', include('finance.urls')),
+    path('', include('dashboard.urls')),
 
     path('api/auth/', include('knox.urls')),
 

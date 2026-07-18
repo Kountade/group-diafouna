@@ -1,4 +1,3 @@
-# finance/services.py
 from decimal import Decimal
 from django.db import transaction as db_transaction
 from django.core.exceptions import ValidationError
@@ -33,8 +32,11 @@ class FinanceService:
 
     @staticmethod
     @db_transaction.atomic
-    def deposit_partner(partner, amount, description=""):
-        """Dépôt partenaire : crédite compte partenaire + compte global."""
+    def deposit_partner(partner, amount, description="", created_by=None):
+        """
+        Dépôt partenaire : crédite compte partenaire + compte global.
+        ✅ created_by permet d'enregistrer l'utilisateur qui effectue le dépôt.
+        """
         if amount <= 0:
             raise ValidationError("Le montant doit être positif.")
 
@@ -52,7 +54,7 @@ class FinanceService:
             to_account=partner_acc,
             amount=amount,
             description=description,
-            created_by=None
+            created_by=created_by,  # ✅ maintenant pris en compte
         )
         return partner_acc.balance
 
@@ -87,47 +89,30 @@ class FinanceService:
     @db_transaction.atomic
     def withdraw_partner_via_agent(partner, agent_user, amount, description="", recipient_data=None):
         """
-        ✅ CORRECTION : Retrait partenaire chez un agent.
-
-        LE COMPTE DU PARTENAIRE EST DÉBITÉ ✅
-        LE COMPTE DE L'AGENT EST DÉBITÉ ✅
-        LE COMPTE GLOBAL N'EST PAS MODIFIÉ (l'argent avait déjà été transféré à l'agent)
-
-        Args:
-            partner: Instance du partenaire
-            agent_user: Utilisateur agent qui effectue le retrait
-            amount: Montant du retrait
-            description: Description du retrait
-            recipient_data: Données du bénéficiaire (dict ou None)
+        Retrait partenaire chez un agent.
+        Le compte partenaire est débité, le compte agent est débité,
+        le compte global n'est pas modifié.
         """
         if amount <= 0:
             raise ValidationError("Le montant doit être positif.")
 
-        # Récupérer les comptes
         partner_acc = FinanceService.get_or_create_partner_account(partner)
         agent_acc = FinanceService.get_or_create_agent_account(agent_user)
 
-        # Vérifier les soldes
         if partner_acc.balance < amount:
             raise ValidationError(
-                f"❌ Solde partenaire insuffisant. Solde actuel: {partner_acc.balance} {partner_acc.currency}"
+                f"Solde partenaire insuffisant. Solde actuel: {partner_acc.balance} {partner_acc.currency}"
             )
         if agent_acc.balance < amount:
             raise ValidationError(
-                f"❌ Solde agent insuffisant. Solde actuel: {agent_acc.balance} {agent_acc.currency}"
+                f"Solde agent insuffisant. Solde actuel: {agent_acc.balance} {agent_acc.currency}"
             )
 
-        # ✅ DÉBITER LE COMPTE PARTENAIRE
         partner_acc.balance -= amount
-
-        # ✅ DÉBITER LE COMPTE AGENT (car il donne l'argent physique)
         agent_acc.balance -= amount
-
-        # Sauvegarder les deux comptes
         partner_acc.save()
         agent_acc.save()
 
-        # Gérer le bénéficiaire
         recipient = None
         recipient_name = None
         recipient_phone = None
@@ -143,7 +128,6 @@ class FinanceService:
                 except WithdrawalRecipient.DoesNotExist:
                     raise ValidationError("Bénéficiaire non trouvé.")
             else:
-                # Créer un nouveau bénéficiaire
                 recipient = WithdrawalRecipient.objects.create(
                     first_name=recipient_data.get('recipient_first_name'),
                     last_name=recipient_data.get('recipient_last_name'),
@@ -158,11 +142,9 @@ class FinanceService:
                 recipient_name = recipient.full_name
                 recipient_phone = recipient.phone
 
-        # ✅ CRÉER LA TRANSACTION
         transaction = Transaction.objects.create(
             transaction_type='withdrawal',
-            from_account=partner_acc,  # ✅ Le partenaire est débité
-            # ✅ L'agent est aussi débité (il donne l'argent)
+            from_account=partner_acc,
             to_account=agent_acc,
             amount=amount,
             description=description,
@@ -177,7 +159,6 @@ class FinanceService:
     @staticmethod
     @db_transaction.atomic
     def get_partner_balance(partner):
-        """Récupère le solde d'un partenaire."""
         account = Account.objects.filter(
             partner=partner, account_type='partner').first()
         return account.balance if account else Decimal('0.00')
@@ -185,7 +166,9 @@ class FinanceService:
     @staticmethod
     @db_transaction.atomic
     def get_agent_balance(agent_user):
-        """Récupère le solde d'un agent."""
         account = Account.objects.filter(
             user=agent_user, account_type='agent').first()
         return account.balance if account else Decimal('0.00')
+    
+    
+    
