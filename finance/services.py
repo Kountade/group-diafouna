@@ -1,3 +1,4 @@
+# finance/services.py
 from decimal import Decimal
 from django.db import transaction as db_transaction
 from django.core.exceptions import ValidationError
@@ -54,7 +55,7 @@ class FinanceService:
             to_account=partner_acc,
             amount=amount,
             description=description,
-            created_by=created_by,  # ✅ maintenant pris en compte
+            created_by=created_by,
         )
         return partner_acc.balance
 
@@ -90,15 +91,18 @@ class FinanceService:
     def withdraw_partner_via_agent(partner, agent_user, amount, description="", recipient_data=None):
         """
         Retrait partenaire chez un agent.
-        Le compte partenaire est débité, le compte agent est débité,
-        le compte global n'est pas modifié.
+        
+        ✅ CORRECTION : Le compte partenaire est débité, le compte agent est débité,
+        ET le compte global est également débité pour refléter la sortie de trésorerie.
         """
         if amount <= 0:
             raise ValidationError("Le montant doit être positif.")
 
         partner_acc = FinanceService.get_or_create_partner_account(partner)
         agent_acc = FinanceService.get_or_create_agent_account(agent_user)
+        global_acc = FinanceService.get_global_account()
 
+        # Vérifier les soldes
         if partner_acc.balance < amount:
             raise ValidationError(
                 f"Solde partenaire insuffisant. Solde actuel: {partner_acc.balance} {partner_acc.currency}"
@@ -107,12 +111,21 @@ class FinanceService:
             raise ValidationError(
                 f"Solde agent insuffisant. Solde actuel: {agent_acc.balance} {agent_acc.currency}"
             )
+        if global_acc.balance < amount:
+            raise ValidationError(
+                f"Solde global insuffisant. Solde actuel: {global_acc.balance} {global_acc.currency}"
+            )
 
+        # Mise à jour des soldes
         partner_acc.balance -= amount
         agent_acc.balance -= amount
+        global_acc.balance -= amount  # ✅ NOUVEAU : Débit du compte global
+        
         partner_acc.save()
         agent_acc.save()
+        global_acc.save()  # ✅ NOUVEAU : Sauvegarde du compte global
 
+        # Gestion du bénéficiaire
         recipient = None
         recipient_name = None
         recipient_phone = None
@@ -121,8 +134,7 @@ class FinanceService:
             recipient_id = recipient_data.get('recipient_id')
             if recipient_id:
                 try:
-                    recipient = WithdrawalRecipient.objects.get(
-                        id=recipient_id)
+                    recipient = WithdrawalRecipient.objects.get(id=recipient_id)
                     recipient_name = recipient.full_name
                     recipient_phone = recipient.phone
                 except WithdrawalRecipient.DoesNotExist:
@@ -133,15 +145,14 @@ class FinanceService:
                     last_name=recipient_data.get('recipient_last_name'),
                     email=recipient_data.get('recipient_email', ''),
                     phone=recipient_data.get('recipient_phone'),
-                    document_type=recipient_data.get(
-                        'recipient_document_type', 'cni'),
-                    document_number=recipient_data.get(
-                        'recipient_document_number'),
+                    document_type=recipient_data.get('recipient_document_type', 'cni'),
+                    document_number=recipient_data.get('recipient_document_number'),
                     address=recipient_data.get('recipient_address', ''),
                 )
                 recipient_name = recipient.full_name
                 recipient_phone = recipient.phone
 
+        # Création de la transaction
         transaction = Transaction.objects.create(
             transaction_type='withdrawal',
             from_account=partner_acc,
@@ -169,6 +180,3 @@ class FinanceService:
         account = Account.objects.filter(
             user=agent_user, account_type='agent').first()
         return account.balance if account else Decimal('0.00')
-    
-    
-    
