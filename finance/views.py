@@ -1,3 +1,4 @@
+# finance/views.py
 from django.shortcuts import render
 from django.db import models
 from django.db.models import Q, Sum, Count
@@ -624,6 +625,7 @@ class TransactionViewSet(viewsets.ReadOnlyModelViewSet):
             "by_type": [
                 {
                     "type": item['transaction_type'],
+                    # ✅ Utilise les nouveaux labels
                     "label": dict(Transaction.TRANSACTION_TYPES).get(item['transaction_type'], item['transaction_type']),
                     "count": item['count'],
                     "total": item['total']
@@ -665,7 +667,7 @@ class TransactionViewSet(viewsets.ReadOnlyModelViewSet):
         for t in queryset:
             writer.writerow([
                 t.id,
-                t.get_transaction_type_display(),
+                t.get_transaction_type_display(),  # ✅ Utilise les nouveaux labels
                 str(t.amount),
                 str(t.from_account),
                 str(t.to_account),

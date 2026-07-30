@@ -1,3 +1,4 @@
+# finance/serializers.py
 from rest_framework import serializers
 from .models import Partner, Account, Transaction, WithdrawalRecipient
 
@@ -66,6 +67,10 @@ class TransactionSerializer(serializers.ModelSerializer):
     recipient_document = serializers.CharField(
         source='recipient.document_number', read_only=True)
     partner_name = serializers.SerializerMethodField()
+    
+    # ✅ Nouveau champ pour le type de mouvement
+    movement_type = serializers.SerializerMethodField()
+    movement_label = serializers.SerializerMethodField()
 
     class Meta:
         model = Transaction
@@ -77,6 +82,32 @@ class TransactionSerializer(serializers.ModelSerializer):
         if obj.transaction_type == 'withdrawal' and obj.from_account and obj.from_account.account_type == 'partner':
             return obj.from_account.partner.name if obj.from_account.partner else None
         return None
+    
+    def get_movement_type(self, obj):
+        """
+        Détermine le type de mouvement pour l'affichage
+        """
+        if obj.transaction_type == 'deposit':
+            return 'ENTREE'
+        elif obj.transaction_type == 'withdrawal':
+            return 'SORTIE'
+        elif obj.transaction_type == 'transfer_to_agent':
+            # Pour les transferts, on regarde quel compte est concerné
+            # Ce champ est surtout utile pour le frontend
+            return 'TRANSFERT'
+        return obj.transaction_type.upper()
+    
+    def get_movement_label(self, obj):
+        """
+        Retourne le label du mouvement
+        """
+        if obj.transaction_type == 'deposit':
+            return 'ENTRÉE'
+        elif obj.transaction_type == 'withdrawal':
+            return 'SORTIE'
+        elif obj.transaction_type == 'transfer_to_agent':
+            return 'Transfert vers Agent'
+        return obj.get_transaction_type_display()
 
 
 class DepositSerializer(serializers.Serializer):

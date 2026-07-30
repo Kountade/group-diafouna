@@ -97,10 +97,11 @@ class WithdrawalRecipient(models.Model):
 
 
 class Transaction(models.Model):
+    # ✅ Modifier les labels des types de transactions
     TRANSACTION_TYPES = (
-        ('deposit', 'Dépôt partenaire'),
-        ('transfer_to_agent', 'Transfert Global → Agent'),
-        ('withdrawal', 'Retrait partenaire via agent'),
+        ('deposit', 'ENTRÉE'),  # Changé de 'Dépôt partenaire' à 'ENTRÉE'
+        ('transfer_to_agent', 'Transfert vers Agent'),
+        ('withdrawal', 'SORTIE'),  # Changé de 'Retrait partenaire via agent' à 'SORTIE'
     )
     
     transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPES)

@@ -4,6 +4,7 @@ from django.db import transaction as db_transaction
 from django.core.exceptions import ValidationError
 from .models import Account, Transaction, Partner, WithdrawalRecipient
 from django.contrib.auth import get_user_model
+from django.db import models
 
 User = get_user_model()
 
@@ -35,8 +36,8 @@ class FinanceService:
     @db_transaction.atomic
     def deposit_partner(partner, amount, description="", created_by=None):
         """
-        Dépôt partenaire : crédite compte partenaire + compte global.
-        ✅ created_by permet d'enregistrer l'utilisateur qui effectue le dépôt.
+        DÉPÔT Partenaire - CRÉDITE le compte partenaire et le compte global
+        ✅ Type: 'deposit' → Sera affiché comme 'ENTRÉE'
         """
         if amount <= 0:
             raise ValidationError("Le montant doit être positif.")
@@ -50,7 +51,7 @@ class FinanceService:
         global_acc.save()
 
         Transaction.objects.create(
-            transaction_type='deposit',
+            transaction_type='deposit',  # ✅ Sera affiché comme 'ENTRÉE'
             from_account=global_acc,
             to_account=partner_acc,
             amount=amount,
@@ -127,22 +128,14 @@ class FinanceService:
     @db_transaction.atomic
     def withdraw_partner_via_agent(partner, agent_user, amount, description="", recipient_data=None):
         """
-        Retrait partenaire chez un agent.
-
-        ✅ CORRECTION : Seuls le compte partenaire et le compte agent sont débités.
-        Le compte global n'est pas impacté lors d'un retrait.
-
-        Logique : L'agent utilise sa propre trésorerie pour payer le retrait du partenaire.
-        - Compte partenaire : DÉBITÉ (son solde diminue)
-        - Compte agent : DÉBITÉ (il paie le retrait)
-        - Compte global : NON IMPACTÉ (l'argent ne sort pas des caisses de l'entreprise)
+        RETRAIT Partenaire - DÉBITE le compte partenaire et le compte agent
+        ✅ Type: 'withdrawal' → Sera affiché comme 'SORTIE'
         """
         if amount <= 0:
             raise ValidationError("Le montant doit être positif.")
 
         partner_acc = FinanceService.get_or_create_partner_account(partner)
         agent_acc = FinanceService.get_or_create_agent_account(agent_user)
-        # On n'a pas besoin du compte global ici
 
         # Vérifier les soldes
         if partner_acc.balance < amount:
@@ -154,7 +147,7 @@ class FinanceService:
                 f"Solde agent insuffisant. Solde actuel: {agent_acc.balance} {agent_acc.currency}"
             )
 
-        # Mise à jour des soldes - SEULEMENT partenaire et agent
+        # Mise à jour des soldes
         partner_acc.balance -= amount
         agent_acc.balance -= amount
 
@@ -194,7 +187,7 @@ class FinanceService:
 
         # Création de la transaction
         transaction = Transaction.objects.create(
-            transaction_type='withdrawal',
+            transaction_type='withdrawal',  # ✅ Sera affiché comme 'SORTIE'
             from_account=partner_acc,
             to_account=agent_acc,
             amount=amount,
