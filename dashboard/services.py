@@ -20,14 +20,156 @@ class DashboardService:
     """Service principal pour les données du tableau de bord"""
 
     @staticmethod
-    def get_global_stats(date_range: str = 'last_30_days') -> Dict[str, Any]:
+    def get_global_stats(date_range: str = 'last_30_days', user=None) -> Dict[str, Any]:
         """
         Obtenir les statistiques globales
-        Inclut les soldes globaux des partenaires et des agents
+        Si user est fourni et est un agent, retourne ses données personnelles
         """
         start_date = DashboardService._get_date_range(date_range)
+        
+        # Vérifier si l'utilisateur est un agent
+        is_agent = user and user.role == 'agent'
+        is_admin = user and user.role == 'admin'
 
         try:
+            if is_agent:
+                # ============================================
+                # STATISTIQUES POUR UN AGENT
+                # ============================================
+                # Récupérer le compte de l'agent
+                agent_account = Account.objects.filter(
+                    user=user, account_type='agent'
+                ).first()
+                
+                if not agent_account:
+                    return {
+                        'error': 'Compte agent non trouvé',
+                        'partners': {'total': 0, 'total_balance': 0, 'active': 0},
+                        'agents': {'total': 0, 'active': 0, 'total_balance': 0},
+                        'global_account': {'balance': 0, 'currency': 'GNF'},
+                        'transactions': {
+                            'total': 0, 'total_amount': 0,
+                            'deposits': 0, 'withdrawals': 0, 'transfers': 0,
+                            'deposits_amount': 0, 'withdrawals_amount': 0, 'transfers_amount': 0,
+                            'avg_amount': 0, 'by_type': {}
+                        },
+                        'period': {'start_date': start_date.isoformat(), 'end_date': timezone.now().isoformat(), 'days': 0},
+                        'agent_balance': 0,
+                        'agent_currency': 'GNF',
+                        'role': 'agent'
+                    }
+
+                # Transactions de l'agent
+                transactions = Transaction.objects.filter(
+                    Q(from_account=agent_account) | Q(to_account=agent_account),
+                    created_at__gte=start_date
+                )
+
+                total_transactions = transactions.count()
+                total_amount = transactions.aggregate(
+                    Sum('amount'))['amount__sum'] or Decimal('0.00')
+
+                # Dépôts reçus par l'agent (transferts depuis global)
+                deposits = transactions.filter(
+                    transaction_type='transfer_to_agent',
+                    to_account=agent_account
+                )
+                deposits_count = deposits.count()
+                deposits_amount = deposits.aggregate(
+                    Sum('amount'))['amount__sum'] or Decimal('0.00')
+
+                # Retraits effectués par l'agent
+                withdrawals = transactions.filter(
+                    transaction_type='withdrawal',
+                    from_account=agent_account
+                )
+                withdrawals_count = withdrawals.count()
+                withdrawals_amount = withdrawals.aggregate(
+                    Sum('amount'))['amount__sum'] or Decimal('0.00')
+
+                # Transferts entre agents
+                transfers_received = transactions.filter(
+                    transaction_type='transfer_between_agents',
+                    to_account=agent_account
+                )
+                transfers_sent = transactions.filter(
+                    transaction_type='transfer_between_agents',
+                    from_account=agent_account
+                )
+                transfers_count = transfers_received.count() + transfers_sent.count()
+                transfers_amount = (transfers_received.aggregate(Sum('amount'))['amount__sum'] or Decimal('0.00')) + \
+                                   (transfers_sent.aggregate(Sum('amount'))['amount__sum'] or Decimal('0.00'))
+
+                # Transactions par type pour les graphiques
+                transactions_by_type = {
+                    'deposit': deposits_count,
+                    'withdrawal': withdrawals_count,
+                    'transfer': transfers_count
+                }
+
+                # Nombre total de partenaires (pour affichage)
+                total_partners = Partner.objects.count()
+
+                return {
+                    'partners': {
+                        'total': total_partners,
+                        'active': 0,
+                        'total_balance': 0,
+                        'avg_balance': 0,
+                        'balances': [],
+                        'top_balances': []
+                    },
+                    'agents': {
+                        'total': 1,
+                        'active': 1,
+                        'total_balance': float(agent_account.balance),
+                        'avg_balance': float(agent_account.balance),
+                        'balances': [{
+                            'id': user.id,
+                            'name': user.get_full_name() or user.email,
+                            'email': user.email,
+                            'balance': float(agent_account.balance),
+                            'currency': agent_account.currency
+                        }],
+                        'top_balances': [{
+                            'id': user.id,
+                            'name': user.get_full_name() or user.email,
+                            'email': user.email,
+                            'balance': float(agent_account.balance),
+                            'currency': agent_account.currency
+                        }]
+                    },
+                    'global_account': {
+                        'balance': float(agent_account.balance),
+                        'currency': agent_account.currency
+                    },
+                    'transactions': {
+                        'total': total_transactions,
+                        'total_amount': float(total_amount),
+                        'deposits': deposits_count,
+                        'deposits_amount': float(deposits_amount),
+                        'withdrawals': withdrawals_count,
+                        'withdrawals_amount': float(withdrawals_amount),
+                        'transfers': transfers_count,
+                        'transfers_amount': float(transfers_amount),
+                        'avg_amount': float(total_amount / total_transactions) if total_transactions > 0 else 0,
+                        'by_type': transactions_by_type
+                    },
+                    'period': {
+                        'start_date': start_date.isoformat(),
+                        'end_date': timezone.now().isoformat(),
+                        'days': (timezone.now() - start_date).days
+                    },
+                    'agent_balance': float(agent_account.balance),
+                    'agent_currency': agent_account.currency,
+                    'role': 'agent',
+                    'is_agent': True,
+                    'user_name': user.get_full_name() or user.email
+                }
+
+            # ============================================
+            # STATISTIQUES POUR ADMIN (comportement existant)
+            # ============================================
             # Statistiques de base - Partenaires
             total_partners = Partner.objects.count()
             active_partners = Partner.objects.filter(is_active=True).count(
@@ -148,17 +290,36 @@ class DashboardService:
                     'start_date': start_date.isoformat(),
                     'end_date': timezone.now().isoformat(),
                     'days': (timezone.now() - start_date).days
-                }
+                },
+                'role': 'admin',
+                'is_agent': False
             }
         except Exception as e:
             logger.error(f"Erreur dans get_global_stats: {str(e)}")
             raise
 
     @staticmethod
-    def get_trends(date_range: str = 'last_30_days') -> Dict[str, Any]:
-        """Obtenir les tendances et évolutions"""
+    def get_trends(date_range: str = 'last_30_days', user=None) -> Dict[str, Any]:
+        """Obtenir les tendances et évolutions pour un utilisateur"""
         start_date = DashboardService._get_date_range(date_range)
-        transactions = Transaction.objects.filter(created_at__gte=start_date)
+        
+        is_agent = user and user.role == 'agent'
+        
+        if is_agent:
+            # Pour un agent, filtrer ses transactions uniquement
+            agent_account = Account.objects.filter(
+                user=user, account_type='agent'
+            ).first()
+            
+            if not agent_account:
+                return {'daily': [], 'moving_average_7d': [], 'total_days': 0}
+            
+            transactions = Transaction.objects.filter(
+                Q(from_account=agent_account) | Q(to_account=agent_account),
+                created_at__gte=start_date
+            )
+        else:
+            transactions = Transaction.objects.filter(created_at__gte=start_date)
 
         # Tendance par jour
         daily_trends = defaultdict(lambda: {
@@ -174,11 +335,11 @@ class DashboardService:
             daily_trends[day_key]['transactions'] += 1
             daily_trends[day_key]['amount'] += transaction.amount
 
-            if transaction.transaction_type == 'deposit':
+            if transaction.transaction_type == 'deposit' or transaction.transaction_type == 'transfer_to_agent':
                 daily_trends[day_key]['deposits'] += 1
             elif transaction.transaction_type == 'withdrawal':
                 daily_trends[day_key]['withdrawals'] += 1
-            elif transaction.transaction_type == 'transfer_to_agent':
+            elif transaction.transaction_type == 'transfer_between_agents':
                 daily_trends[day_key]['transfers'] += 1
 
         # Calculer les moyennes mobiles
@@ -213,8 +374,46 @@ class DashboardService:
         }
 
     @staticmethod
-    def get_top_performers(limit: int = 10) -> Dict[str, Any]:
+    def get_top_performers(limit: int = 10, user=None) -> Dict[str, Any]:
         """Obtenir les meilleurs performeurs"""
+        is_agent = user and user.role == 'agent'
+        
+        if is_agent:
+            # Pour un agent, retourner ses propres données
+            agent_account = Account.objects.filter(
+                user=user, account_type='agent'
+            ).first()
+            
+            if not agent_account:
+                return {'top_partners': [], 'top_agents': []}
+            
+            agent_data = {
+                'id': user.id,
+                'name': user.get_full_name() or user.email,
+                'email': user.email,
+                'balance': float(agent_account.balance),
+                'volume': 0,
+                'transaction_count': 0,
+                'avg_transaction': 0
+            }
+            
+            transactions = Transaction.objects.filter(
+                Q(from_account=agent_account) | Q(to_account=agent_account)
+            )
+            
+            volume = transactions.aggregate(Sum('amount'))['amount__sum'] or Decimal('0.00')
+            count = transactions.count()
+            
+            agent_data['volume'] = float(volume)
+            agent_data['transaction_count'] = count
+            agent_data['avg_transaction'] = float(volume / count) if count > 0 else 0
+            
+            return {
+                'top_partners': [],
+                'top_agents': [agent_data]
+            }
+        
+        # Comportement admin (existant)
         # Top partenaires par volume
         top_partners = []
         for partner in Partner.objects.all():
@@ -338,19 +537,44 @@ class DashboardService:
         }
 
     @staticmethod
-    def get_withdrawal_analytics(date_range: str = 'last_30_days') -> Dict[str, Any]:
+    def get_withdrawal_analytics(date_range: str = 'last_30_days', user=None) -> Dict[str, Any]:
         """Analyses des retraits"""
         start_date = DashboardService._get_date_range(date_range)
-        withdrawals = Transaction.objects.filter(
-            transaction_type='withdrawal',
-            created_at__gte=start_date
-        )
+        
+        is_agent = user and user.role == 'agent'
+        
+        if is_agent:
+            # Pour un agent, seulement ses retraits
+            agent_account = Account.objects.filter(
+                user=user, account_type='agent'
+            ).first()
+            
+            if not agent_account:
+                return {
+                    'total_withdrawals': 0,
+                    'total_amount': 0,
+                    'avg_amount': 0,
+                    'top_recipients': [],
+                    'amount_distribution': {},
+                    'period': {'start_date': start_date.isoformat(), 'end_date': timezone.now().isoformat()}
+                }
+            
+            withdrawals = Transaction.objects.filter(
+                transaction_type='withdrawal',
+                from_account=agent_account,
+                created_at__gte=start_date
+            )
+        else:
+            withdrawals = Transaction.objects.filter(
+                transaction_type='withdrawal',
+                created_at__gte=start_date
+            )
 
         total_withdrawals = withdrawals.count()
         total_amount = withdrawals.aggregate(
             Sum('amount'))['amount__sum'] or Decimal('0.00')
 
-        # Top bénéficiaires
+        # Top bénéficiaires (pour agent, ceux qu'il a utilisés)
         top_recipients = (
             WithdrawalRecipient.objects
             .filter(transactions__in=withdrawals)
@@ -407,8 +631,58 @@ class DashboardService:
         }
 
     @staticmethod
-    def get_balance_snapshot() -> Dict[str, Any]:
-        """Instantané des soldes - Inclut les soldes globaux"""
+    def get_balance_snapshot(user=None) -> Dict[str, Any]:
+        """Instantané des soldes"""
+        is_agent = user and user.role == 'agent'
+        
+        if is_agent:
+            # Pour un agent, seulement son solde
+            agent_account = Account.objects.filter(
+                user=user, account_type='agent'
+            ).first()
+            
+            if not agent_account:
+                return {
+                    'global_balance': 0,
+                    'partner_accounts': {'total': 0, 'total_balance': 0, 'top_balances': [], 'avg_balance': 0, 'max_balance': 0, 'min_balance': 0},
+                    'agent_accounts': {'total': 0, 'total_balance': 0, 'top_balances': [], 'avg_balance': 0, 'max_balance': 0, 'min_balance': 0},
+                    'summary': {'total_balance_all': 0, 'partners_share': 0, 'agents_share': 0, 'global_share': 0}
+                }
+            
+            agent_data = {
+                'name': user.get_full_name() or user.email,
+                'email': user.email,
+                'balance': float(agent_account.balance),
+                'currency': agent_account.currency
+            }
+            
+            return {
+                'global_balance': float(agent_account.balance),
+                'partner_accounts': {
+                    'total': 0,
+                    'total_balance': 0,
+                    'top_balances': [],
+                    'avg_balance': 0,
+                    'max_balance': 0,
+                    'min_balance': 0
+                },
+                'agent_accounts': {
+                    'total': 1,
+                    'total_balance': float(agent_account.balance),
+                    'top_balances': [agent_data],
+                    'avg_balance': float(agent_account.balance),
+                    'max_balance': float(agent_account.balance),
+                    'min_balance': float(agent_account.balance)
+                },
+                'summary': {
+                    'total_balance_all': float(agent_account.balance),
+                    'partners_share': 0,
+                    'agents_share': 100,
+                    'global_share': 0
+                }
+            }
+        
+        # Comportement admin (existant)
         # Comptes partenaires
         partner_accounts = Account.objects.filter(account_type='partner')
         partner_data = []
@@ -561,7 +835,7 @@ class DashboardService:
             'last_90_days': now - timedelta(days=90),
             'last_180_days': now - timedelta(days=180),
             'last_year': now - timedelta(days=365),
-            'all_time': now - timedelta(days=3650),  # 10 ans
+            'all_time': now - timedelta(days=3650),
             'this_week': now - timedelta(days=now.weekday()),
             'this_month': now.replace(day=1),
             'this_quarter': now.replace(month=((now.month - 1) // 3) * 3 + 1, day=1),
@@ -574,12 +848,12 @@ class DashboardMetricsService:
     """Service pour les métriques du tableau de bord"""
 
     @staticmethod
-    def calculate_metrics() -> Dict[str, Any]:
+    def calculate_metrics(user=None) -> Dict[str, Any]:
         """Calculer toutes les métriques"""
         from .models import DashboardMetric
 
-        stats = DashboardService.get_global_stats('last_30_days')
-        snapshot = DashboardService.get_balance_snapshot()
+        stats = DashboardService.get_global_stats('last_30_days', user)
+        snapshot = DashboardService.get_balance_snapshot(user)
 
         metrics = {
             'total_balance': snapshot['global_balance'],
@@ -633,9 +907,9 @@ class DashboardExportService:
     """Service pour l'export des données du tableau de bord"""
 
     @staticmethod
-    def export_balance_report() -> Dict[str, Any]:
+    def export_balance_report(user=None) -> Dict[str, Any]:
         """Exporter un rapport des soldes"""
-        snapshot = DashboardService.get_balance_snapshot()
+        snapshot = DashboardService.get_balance_snapshot(user)
 
         return {
             'generated_at': timezone.now().isoformat(),
@@ -654,10 +928,10 @@ class DashboardExportService:
         }
 
     @staticmethod
-    def export_transaction_report(date_range: str = 'last_30_days') -> Dict[str, Any]:
+    def export_transaction_report(date_range: str = 'last_30_days', user=None) -> Dict[str, Any]:
         """Exporter un rapport des transactions"""
-        stats = DashboardService.get_global_stats(date_range)
-        trends = DashboardService.get_trends(date_range)
+        stats = DashboardService.get_global_stats(date_range, user)
+        trends = DashboardService.get_trends(date_range, user)
 
         return {
             'generated_at': timezone.now().isoformat(),

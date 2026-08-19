@@ -1,9 +1,11 @@
+# dashboard/views.py
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.db import transaction
 from django.core.exceptions import ValidationError
 from django.contrib.auth import get_user_model
+from django.db.models import Q
 import json
 
 from .models import DashboardPreferences, DashboardAlert, DashboardWidget, DashboardMetric
@@ -24,7 +26,9 @@ class DashboardViewSet(viewsets.ViewSet):
 
     def get_permissions(self):
         if self.action in ['get_stats', 'get_trends', 'get_top_performers',
-                           'get_withdrawal_analytics', 'get_balance_snapshot']:
+                           'get_withdrawal_analytics', 'get_balance_snapshot',
+                           'get_dashboard_summary']:
+            # Admin ou agent peuvent accéder
             if self.request.user.role not in ['admin', 'agent']:
                 self.permission_classes = [permissions.IsAuthenticated]
         return super().get_permissions()
@@ -35,7 +39,8 @@ class DashboardViewSet(viewsets.ViewSet):
         date_range = request.query_params.get('date_range', 'last_30_days')
 
         try:
-            stats = DashboardService.get_global_stats(date_range)
+            # ✅ Passer l'utilisateur connecté pour les stats personnalisées
+            stats = DashboardService.get_global_stats(date_range, request.user)
             return Response(stats)
         except Exception as e:
             return Response(
@@ -49,7 +54,8 @@ class DashboardViewSet(viewsets.ViewSet):
         date_range = request.query_params.get('date_range', 'last_30_days')
 
         try:
-            trends = DashboardService.get_trends(date_range)
+            # ✅ Passer l'utilisateur connecté pour les tendances personnalisées
+            trends = DashboardService.get_trends(date_range, request.user)
             return Response(trends)
         except Exception as e:
             return Response(
@@ -63,7 +69,8 @@ class DashboardViewSet(viewsets.ViewSet):
         limit = request.query_params.get('limit', 10)
 
         try:
-            top_performers = DashboardService.get_top_performers(int(limit))
+            # ✅ Passer l'utilisateur connecté
+            top_performers = DashboardService.get_top_performers(int(limit), request.user)
             return Response(top_performers)
         except Exception as e:
             return Response(
@@ -94,7 +101,8 @@ class DashboardViewSet(viewsets.ViewSet):
         date_range = request.query_params.get('date_range', 'last_30_days')
 
         try:
-            analytics = DashboardService.get_withdrawal_analytics(date_range)
+            # ✅ Passer l'utilisateur connecté
+            analytics = DashboardService.get_withdrawal_analytics(date_range, request.user)
             return Response(analytics)
         except Exception as e:
             return Response(
@@ -106,7 +114,8 @@ class DashboardViewSet(viewsets.ViewSet):
     def get_balance_snapshot(self, request):
         """Obtenir l'instantané des soldes"""
         try:
-            snapshot = DashboardService.get_balance_snapshot()
+            # ✅ Passer l'utilisateur connecté
+            snapshot = DashboardService.get_balance_snapshot(request.user)
             return Response(snapshot)
         except Exception as e:
             return Response(
@@ -158,12 +167,13 @@ class DashboardViewSet(viewsets.ViewSet):
 
         try:
             with transaction.atomic():
-                stats = DashboardService.get_global_stats(date_range)
-                trends = DashboardService.get_trends(date_range)
-                top_performers = DashboardService.get_top_performers(5)
+                # ✅ Passer l'utilisateur connecté à toutes les méthodes
+                stats = DashboardService.get_global_stats(date_range, request.user)
+                trends = DashboardService.get_trends(date_range, request.user)
+                top_performers = DashboardService.get_top_performers(5, request.user)
                 withdrawal_analytics = DashboardService.get_withdrawal_analytics(
-                    date_range)
-                balance_snapshot = DashboardService.get_balance_snapshot()
+                    date_range, request.user)
+                balance_snapshot = DashboardService.get_balance_snapshot(request.user)
                 alerts = DashboardService.get_alerts(
                     request.user.id if request.user.role != 'admin' else None
                 )
@@ -313,19 +323,15 @@ class DashboardMetricViewSet(viewsets.ReadOnlyModelViewSet):
             )
 
         try:
-            # Mettre à jour les métriques (implémentation à faire)
             from .models import DashboardMetric
+            stats = DashboardService.get_global_stats('last_30_days', request.user)
 
-            stats = DashboardService.get_global_stats('last_30_days')
-
-            # Créer ou mettre à jour les métriques
             metrics_data = [
                 ('total_balance', stats['global_account']['balance']),
                 ('total_transactions', stats['transactions']['total']),
                 ('active_agents', stats['agents']['active']),
                 ('total_partners', stats['partners']['total']),
-                ('withdrawal_volume',
-                 stats['transactions']['withdrawals_amount']),
+                ('withdrawal_volume', stats['transactions']['withdrawals_amount']),
                 ('deposit_volume', stats['transactions']['deposits_amount']),
             ]
 
