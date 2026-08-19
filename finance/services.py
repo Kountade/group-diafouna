@@ -51,7 +51,7 @@ class FinanceService:
         global_acc.save()
 
         Transaction.objects.create(
-            transaction_type='deposit',  # ✅ Sera affiché comme 'ENTRÉE'
+            transaction_type='deposit',
             from_account=global_acc,
             to_account=partner_acc,
             amount=amount,
@@ -130,6 +130,8 @@ class FinanceService:
         """
         RETRAIT Partenaire - DÉBITE le compte partenaire et le compte agent
         ✅ Type: 'withdrawal' → Sera affiché comme 'SORTIE'
+        ✅ MODIFICATION: Suppression de la vérification du solde de l'agent
+        ✅ L'agent peut maintenant avoir un solde négatif
         """
         if amount <= 0:
             raise ValidationError("Le montant doit être positif.")
@@ -137,19 +139,18 @@ class FinanceService:
         partner_acc = FinanceService.get_or_create_partner_account(partner)
         agent_acc = FinanceService.get_or_create_agent_account(agent_user)
 
-        # Vérifier les soldes
+        # ✅ Vérification UNIQUEMENT du solde du partenaire
         if partner_acc.balance < amount:
             raise ValidationError(
                 f"Solde partenaire insuffisant. Solde actuel: {partner_acc.balance} {partner_acc.currency}"
             )
-        if agent_acc.balance < amount:
-            raise ValidationError(
-                f"Solde agent insuffisant. Solde actuel: {agent_acc.balance} {agent_acc.currency}"
-            )
+        
+        # ❌ SUPPRESSION de la vérification du solde de l'agent
+        # L'agent peut maintenant avoir un solde négatif
 
         # Mise à jour des soldes
         partner_acc.balance -= amount
-        agent_acc.balance -= amount
+        agent_acc.balance -= amount  # ✅ Permet d'avoir un solde négatif
 
         partner_acc.save()
         agent_acc.save()
@@ -187,7 +188,7 @@ class FinanceService:
 
         # Création de la transaction
         transaction = Transaction.objects.create(
-            transaction_type='withdrawal',  # ✅ Sera affiché comme 'SORTIE'
+            transaction_type='withdrawal',
             from_account=partner_acc,
             to_account=agent_acc,
             amount=amount,

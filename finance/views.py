@@ -163,21 +163,35 @@ class TransactionViewSet(viewsets.ReadOnlyModelViewSet):
             except Partner.DoesNotExist:
                 return Transaction.objects.none()
 
-        agent_id = self.request.query_params.get('agent')
-        if agent_id:
-            try:
-                agent_user = User.objects.get(id=agent_id, role='agent')
-                agent_account = Account.objects.filter(
-                    user=agent_user, account_type='agent').first()
-                if agent_account:
-                    if user.role == 'admin':
-                        return queryset.filter(
-                            Q(from_account=agent_account) |
-                            Q(to_account=agent_account)
-                        )
-                return Transaction.objects.none()
-            except User.DoesNotExist:
-                return Transaction.objects.none()
+        # ✅ CORRECTION: Gestion de 'agent' avec 'me' ou un ID
+        agent_param = self.request.query_params.get('agent')
+        if agent_param:
+            # ✅ Si c'est 'me', utiliser l'utilisateur connecté
+            if agent_param.lower() == 'me':
+                if user.role == 'agent':
+                    agent_user = user
+                else:
+                    return Transaction.objects.none()
+            else:
+                # Sinon, essayer de récupérer l'agent par ID
+                try:
+                    agent_user = User.objects.get(id=int(agent_param), role='agent')
+                except (ValueError, User.DoesNotExist):
+                    return Transaction.objects.none()
+            
+            # Récupérer le compte de l'agent
+            agent_account = Account.objects.filter(
+                user=agent_user, account_type='agent'
+            ).first()
+            
+            if agent_account:
+                # Les admins peuvent voir les transactions de n'importe quel agent
+                if user.role == 'admin' or (user.role == 'agent' and user.id == agent_user.id):
+                    return queryset.filter(
+                        Q(from_account=agent_account) |
+                        Q(to_account=agent_account)
+                    )
+            return Transaction.objects.none()
 
         transaction_type = self.request.query_params.get('transaction_type')
         if transaction_type:
@@ -368,6 +382,10 @@ class TransactionViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=False, methods=['post'])
     def withdraw(self, request):
+        """
+        RETRAIT Partenaire - Action effectuée par un agent
+        ✅ MODIFICATION: L'agent peut maintenant avoir un solde négatif
+        """
         if request.user.role != 'agent':
             return Response(
                 {"error": "Seul un agent peut enregistrer un retrait"},
@@ -412,6 +430,8 @@ class TransactionViewSet(viewsets.ReadOnlyModelViewSet):
                     {"error": "Veuillez spécifier un bénéficiaire (existant ou nouveau)"},
                     status=400
                 )
+            
+            # ✅ Appel du service modifié qui ne vérifie plus le solde de l'agent
             new_balance, transaction = FinanceService.withdraw_partner_via_agent(
                 partner,
                 request.user,
@@ -419,9 +439,14 @@ class TransactionViewSet(viewsets.ReadOnlyModelViewSet):
                 serializer.validated_data.get('description', ''),
                 recipient_data
             )
+            
+            # ✅ Récupération du nouveau solde de l'agent (peut être négatif)
+            agent_account = Account.objects.get(user=request.user, account_type='agent')
+            
             response_data = {
                 "message": "Retrait effectué avec succès",
                 "partner_balance": new_balance,
+                "agent_balance": agent_account.balance,  # ✅ Nouveau solde de l'agent
                 "transaction_id": transaction.id,
                 "amount": str(transaction.amount),
                 "created_at": transaction.created_at
@@ -625,7 +650,6 @@ class TransactionViewSet(viewsets.ReadOnlyModelViewSet):
             "by_type": [
                 {
                     "type": item['transaction_type'],
-                    # ✅ Utilise les nouveaux labels
                     "label": dict(Transaction.TRANSACTION_TYPES).get(item['transaction_type'], item['transaction_type']),
                     "count": item['count'],
                     "total": item['total']
@@ -667,7 +691,7 @@ class TransactionViewSet(viewsets.ReadOnlyModelViewSet):
         for t in queryset:
             writer.writerow([
                 t.id,
-                t.get_transaction_type_display(),  # ✅ Utilise les nouveaux labels
+                t.get_transaction_type_display(),
                 str(t.amount),
                 str(t.from_account),
                 str(t.to_account),
