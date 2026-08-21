@@ -130,8 +130,8 @@ class FinanceService:
         """
         RETRAIT Partenaire - DÉBITE le compte partenaire et le compte agent
         ✅ Type: 'withdrawal' → Sera affiché comme 'SORTIE'
-        ✅ MODIFICATION: Suppression de la vérification du solde de l'agent
-        ✅ L'agent peut maintenant avoir un solde négatif
+        ✅ MODIFICATION: Suppression de la vérification du solde du partenaire
+        ✅ Le partenaire peut maintenant avoir un solde négatif
         """
         if amount <= 0:
             raise ValidationError("Le montant doit être positif.")
@@ -139,18 +139,12 @@ class FinanceService:
         partner_acc = FinanceService.get_or_create_partner_account(partner)
         agent_acc = FinanceService.get_or_create_agent_account(agent_user)
 
-        # ✅ Vérification UNIQUEMENT du solde du partenaire
-        if partner_acc.balance < amount:
-            raise ValidationError(
-                f"Solde partenaire insuffisant. Solde actuel: {partner_acc.balance} {partner_acc.currency}"
-            )
-        
-        # ❌ SUPPRESSION de la vérification du solde de l'agent
-        # L'agent peut maintenant avoir un solde négatif
+        # ❌ SUPPRESSION de la vérification du solde du partenaire
+        # Le partenaire peut maintenant avoir un solde négatif
 
         # Mise à jour des soldes
-        partner_acc.balance -= amount
-        agent_acc.balance -= amount  # ✅ Permet d'avoir un solde négatif
+        partner_acc.balance -= amount  # ✅ Permet d'avoir un solde négatif
+        agent_acc.balance -= amount    # ✅ Permet d'avoir un solde négatif
 
         partner_acc.save()
         agent_acc.save()
