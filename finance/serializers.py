@@ -1,12 +1,20 @@
-# finance/serializers.py
+# finances/serializers.py
 from rest_framework import serializers
 from .models import Partner, Account, Transaction, WithdrawalRecipient
 
 
 class PartnerSerializer(serializers.ModelSerializer):
+    account_balance = serializers.SerializerMethodField()
+
     class Meta:
         model = Partner
         fields = '__all__'
+        read_only_fields = ('is_deleted', 'deleted_at')
+
+    def get_account_balance(self, obj):
+        account = Account.objects.filter(
+            partner=obj, account_type='partner').first()
+        return float(account.balance) if account else 0.0
 
 
 class AccountSerializer(serializers.ModelSerializer):
@@ -52,10 +60,10 @@ class WithdrawalRecipientSimpleSerializer(serializers.ModelSerializer):
 
 
 class TransactionSerializer(serializers.ModelSerializer):
-    from_account_type = serializers.CharField(
-        source='from_account.account_type')
-    to_account_type = serializers.CharField(
-        source='to_account.account_type')
+    from_account_type = serializers.SerializerMethodField()
+    to_account_type = serializers.SerializerMethodField()
+    from_account_label = serializers.SerializerMethodField()
+    to_account_label = serializers.SerializerMethodField()
     created_by_email = serializers.EmailField(
         source='created_by.email', read_only=True)
     created_by_full_name = serializers.CharField(
@@ -67,8 +75,6 @@ class TransactionSerializer(serializers.ModelSerializer):
     recipient_document = serializers.CharField(
         source='recipient.document_number', read_only=True)
     partner_name = serializers.SerializerMethodField()
-    
-    # ✅ Nouveau champ pour le type de mouvement
     movement_type = serializers.SerializerMethodField()
     movement_label = serializers.SerializerMethodField()
 
@@ -76,37 +82,55 @@ class TransactionSerializer(serializers.ModelSerializer):
         model = Transaction
         fields = '__all__'
 
+    def get_from_account_type(self, obj):
+        if obj.from_account:
+            return obj.from_account.account_type
+        return obj.from_account_type_snapshot or 'deleted'
+
+    def get_to_account_type(self, obj):
+        if obj.to_account:
+            return obj.to_account.account_type
+        return obj.to_account_type_snapshot or 'deleted'
+
+    def get_from_account_label(self, obj):
+        if obj.from_account:
+            return str(obj.from_account)
+        return obj.from_account_label_snapshot or 'Compte supprimé'
+
+    def get_to_account_label(self, obj):
+        if obj.to_account:
+            return str(obj.to_account)
+        return obj.to_account_label_snapshot or 'Compte supprimé'
+
     def get_partner_name(self, obj):
         if obj.transaction_type == 'deposit' and obj.to_account and obj.to_account.account_type == 'partner':
             return obj.to_account.partner.name if obj.to_account.partner else None
         if obj.transaction_type == 'withdrawal' and obj.from_account and obj.from_account.account_type == 'partner':
             return obj.from_account.partner.name if obj.from_account.partner else None
         return None
-    
+
     def get_movement_type(self, obj):
-        """
-        Détermine le type de mouvement pour l'affichage
-        """
         if obj.transaction_type == 'deposit':
             return 'ENTREE'
         elif obj.transaction_type == 'withdrawal':
             return 'SORTIE'
-        elif obj.transaction_type == 'transfer_to_agent':
-            # Pour les transferts, on regarde quel compte est concerné
-            # Ce champ est surtout utile pour le frontend
+        elif obj.transaction_type in ('transfer_to_agent', 'transfer_between_agents'):
             return 'TRANSFERT'
+        elif obj.transaction_type == 'partner_deletion_reversal':
+            return 'ANNULATION'
         return obj.transaction_type.upper()
-    
+
     def get_movement_label(self, obj):
-        """
-        Retourne le label du mouvement
-        """
         if obj.transaction_type == 'deposit':
             return 'ENTRÉE'
         elif obj.transaction_type == 'withdrawal':
             return 'SORTIE'
         elif obj.transaction_type == 'transfer_to_agent':
             return 'Transfert vers Agent'
+        elif obj.transaction_type == 'transfer_between_agents':
+            return 'Transfert entre Agents'
+        elif obj.transaction_type == 'partner_deletion_reversal':
+            return 'Annulation (suppression partenaire)'
         return obj.get_transaction_type_display()
 
 
@@ -123,25 +147,11 @@ class TransferToAgentSerializer(serializers.Serializer):
 
 
 class TransferBetweenAgentsSerializer(serializers.Serializer):
-    agent_destinataire_id = serializers.IntegerField(
-        help_text="ID de l'agent destinataire"
-    )
+    agent_destinataire_id = serializers.IntegerField()
     amount = serializers.DecimalField(
-        max_digits=15,
-        decimal_places=2,
-        min_value=0.01,
-        help_text="Montant à transférer"
-    )
-    description = serializers.CharField(
-        required=False,
-        allow_blank=True,
-        help_text="Description du transfert"
-    )
-    motif = serializers.CharField(
-        required=False,
-        allow_blank=True,
-        help_text="Motif du transfert"
-    )
+        max_digits=15, decimal_places=2, min_value=0.01)
+    description = serializers.CharField(required=False, allow_blank=True)
+    motif = serializers.CharField(required=False, allow_blank=True)
 
     def validate_amount(self, value):
         if value <= 0:
@@ -152,7 +162,7 @@ class TransferBetweenAgentsSerializer(serializers.Serializer):
         from django.contrib.auth import get_user_model
         User = get_user_model()
         try:
-            user = User.objects.get(id=value, role='agent')
+            User.objects.get(id=value, role='agent')
         except User.DoesNotExist:
             raise serializers.ValidationError("Agent destinataire non trouvé")
         return value
@@ -163,36 +173,37 @@ class WithdrawalSerializer(serializers.Serializer):
     amount = serializers.DecimalField(max_digits=15, decimal_places=2)
     description = serializers.CharField(required=False, allow_blank=True)
 
-    recipient_id = serializers.IntegerField(
-        required=False, help_text="ID du bénéficiaire existant")
+    recipient_id = serializers.IntegerField(required=False)
     recipient_first_name = serializers.CharField(
         required=False, max_length=100)
-    recipient_last_name = serializers.CharField(
-        required=False, max_length=100)
-    recipient_phone = serializers.CharField(
-        required=False, max_length=20)
-    recipient_email = serializers.EmailField(
-        required=False, allow_blank=True)
+    recipient_last_name = serializers.CharField(required=False, max_length=100)
+    recipient_phone = serializers.CharField(required=False, max_length=20)
+    recipient_email = serializers.EmailField(required=False, allow_blank=True)
     recipient_document_type = serializers.ChoiceField(
-        choices=WithdrawalRecipient.DOCUMENT_TYPES, required=False
-    )
+        choices=WithdrawalRecipient.DOCUMENT_TYPES, required=False)
     recipient_document_number = serializers.CharField(
         required=False, max_length=50)
-    recipient_address = serializers.CharField(
-        required=False, allow_blank=True)
+    recipient_address = serializers.CharField(required=False, allow_blank=True)
 
     def validate(self, data):
         if data.get('recipient_id'):
             return data
-
         required_fields = ['recipient_first_name', 'recipient_last_name',
                            'recipient_phone', 'recipient_document_number']
-        missing_fields = [
-            field for field in required_fields if not data.get(field)]
-
+        missing_fields = [f for f in required_fields if not data.get(f)]
         if missing_fields:
             raise serializers.ValidationError(
-                f"Pour créer un nouveau bénéficiaire, les champs suivants sont requis: {', '.join(missing_fields)}"
-            )
-
+                f"Champs requis pour nouveau bénéficiaire: {', '.join(missing_fields)}")
         return data
+
+
+class PartnerDeletionSerializer(serializers.Serializer):
+    reason = serializers.CharField(required=False, allow_blank=True)
+    confirm = serializers.BooleanField(required=True)
+    hard_delete = serializers.BooleanField(required=False, default=False)
+
+    def validate_confirm(self, value):
+        if not value:
+            raise serializers.ValidationError(
+                "Vous devez confirmer la suppression en mettant 'confirm' à true.")
+        return value

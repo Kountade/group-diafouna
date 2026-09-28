@@ -1,26 +1,36 @@
-# finance/services.py
+# finances/services.py
 from decimal import Decimal
 from django.db import transaction as db_transaction
 from django.core.exceptions import ValidationError
-from .models import Account, Transaction, Partner, WithdrawalRecipient
-from django.contrib.auth import get_user_model
+from django.utils import timezone
 from django.db import models
+from django.contrib.auth import get_user_model
+
+from .models import Account, Transaction, Partner, WithdrawalRecipient
 
 User = get_user_model()
 
 
 class FinanceService:
 
+    # ============================================================
+    # COMPTES
+    # ============================================================
+
     @staticmethod
     @db_transaction.atomic
     def get_global_account():
-        return Account.objects.get_or_create(account_type='global')[0]
+        return Account.objects.get_or_create(
+            account_type='global',
+            defaults={'balance': Decimal('0.00'), 'currency': 'XOF'}
+        )[0]
 
     @staticmethod
     @db_transaction.atomic
     def get_or_create_partner_account(partner):
         account, _ = Account.objects.get_or_create(
-            partner=partner, account_type='partner')
+            partner=partner, account_type='partner',
+            defaults={'balance': Decimal('0.00'), 'currency': 'XOF'})
         return account
 
     @staticmethod
@@ -29,26 +39,37 @@ class FinanceService:
         if agent_user.role != 'agent':
             raise ValidationError("Seul un agent peut avoir un compte.")
         account, _ = Account.objects.get_or_create(
-            user=agent_user, account_type='agent')
+            user=agent_user, account_type='agent',
+            defaults={'balance': Decimal('0.00'), 'currency': 'XOF'})
         return account
+
+    # ============================================================
+    # OPÉRATIONS FINANCIÈRES
+    # ============================================================
 
     @staticmethod
     @db_transaction.atomic
     def deposit_partner(partner, amount, description="", created_by=None):
         """
-        DÉPÔT Partenaire - CRÉDITE le compte partenaire et le compte global
-        ✅ Type: 'deposit' → Sera affiché comme 'ENTRÉE'
+        DÉPÔT Partenaire (ENTRÉE) :
+        - Compte Global : DIMINUE (le global donne l'argent)
+        - Compte Partenaire : AUGMENTE (le partenaire reçoit)
         """
+        amount = Decimal(str(amount))
         if amount <= 0:
             raise ValidationError("Le montant doit être positif.")
+
+        if partner.is_deleted:
+            raise ValidationError("Ce partenaire est supprimé.")
 
         partner_acc = FinanceService.get_or_create_partner_account(partner)
         global_acc = FinanceService.get_global_account()
 
+        # ✅ CORRECTION : Le global DIMINUE
+        global_acc.balance -= amount
         partner_acc.balance += amount
-        global_acc.balance += amount
-        partner_acc.save()
         global_acc.save()
+        partner_acc.save()
 
         Transaction.objects.create(
             transaction_type='deposit',
@@ -63,14 +84,17 @@ class FinanceService:
     @staticmethod
     @db_transaction.atomic
     def transfer_to_agent(agent_user, amount, description=""):
-        """Transfert du compte global vers un agent."""
+        """Transfert Global → Agent : Global DIMINUE, Agent AUGMENTE"""
+        amount = Decimal(str(amount))
         if amount <= 0:
             raise ValidationError("Montant invalide.")
+
         global_acc = FinanceService.get_global_account()
         agent_acc = FinanceService.get_or_create_agent_account(agent_user)
 
         if global_acc.balance < amount:
-            raise ValidationError("Solde global insuffisant.")
+            raise ValidationError(
+                f"Solde global insuffisant. Solde actuel: {global_acc.balance} XOF")
 
         global_acc.balance -= amount
         agent_acc.balance += amount
@@ -90,9 +114,8 @@ class FinanceService:
     @staticmethod
     @db_transaction.atomic
     def transfer_between_agents(from_agent, to_agent, amount, description=""):
-        """
-        Transfert d'argent entre deux agents.
-        """
+        """Transfert Agent → Agent : source DIMINUE, destination AUGMENTE"""
+        amount = Decimal(str(amount))
         if amount <= 0:
             raise ValidationError("Le montant doit être positif.")
 
@@ -105,8 +128,7 @@ class FinanceService:
 
         if from_acc.balance < amount:
             raise ValidationError(
-                f"Solde insuffisant. Solde actuel: {from_acc.balance} {from_acc.currency}"
-            )
+                f"Solde insuffisant. Solde actuel: {from_acc.balance} {from_acc.currency}")
 
         from_acc.balance -= amount
         to_acc.balance += amount
@@ -121,31 +143,29 @@ class FinanceService:
             description=description,
             created_by=from_agent
         )
-
         return from_acc.balance, transaction
 
     @staticmethod
     @db_transaction.atomic
     def withdraw_partner_via_agent(partner, agent_user, amount, description="", recipient_data=None):
         """
-        RETRAIT Partenaire - DÉBITE le compte partenaire et le compte agent
-        ✅ Type: 'withdrawal' → Sera affiché comme 'SORTIE'
-        ✅ MODIFICATION: Suppression de la vérification du solde du partenaire
-        ✅ Le partenaire peut maintenant avoir un solde négatif
+        RETRAIT Partenaire (SORTIE) :
+        - Compte Partenaire : DIMINUE
+        - Compte Agent : AUGMENTE (l'agent reçoit l'argent qu'il va donner au bénéficiaire)
         """
+        amount = Decimal(str(amount))
         if amount <= 0:
             raise ValidationError("Le montant doit être positif.")
+
+        if partner.is_deleted:
+            raise ValidationError("Ce partenaire est supprimé.")
 
         partner_acc = FinanceService.get_or_create_partner_account(partner)
         agent_acc = FinanceService.get_or_create_agent_account(agent_user)
 
-        # ❌ SUPPRESSION de la vérification du solde du partenaire
-        # Le partenaire peut maintenant avoir un solde négatif
-
-        # Mise à jour des soldes
-        partner_acc.balance -= amount  # ✅ Permet d'avoir un solde négatif
-        agent_acc.balance -= amount    # ✅ Permet d'avoir un solde négatif
-
+        # ✅ CORRECTION : L'agent AUGMENTE (il reçoit l'argent du partenaire)
+        partner_acc.balance -= amount
+        agent_acc.balance += amount
         partner_acc.save()
         agent_acc.save()
 
@@ -165,7 +185,6 @@ class FinanceService:
                 except WithdrawalRecipient.DoesNotExist:
                     raise ValidationError("Bénéficiaire non trouvé.")
             else:
-                # Créer un nouveau bénéficiaire
                 recipient = WithdrawalRecipient.objects.create(
                     first_name=recipient_data.get('recipient_first_name'),
                     last_name=recipient_data.get('recipient_last_name'),
@@ -180,7 +199,6 @@ class FinanceService:
                 recipient_name = recipient.full_name
                 recipient_phone = recipient.phone
 
-        # Création de la transaction
         transaction = Transaction.objects.create(
             transaction_type='withdrawal',
             from_account=partner_acc,
@@ -192,79 +210,182 @@ class FinanceService:
             recipient_name=recipient_name,
             recipient_phone=recipient_phone,
         )
-
         return partner_acc.balance, transaction
+
+    # ============================================================
+    # ANNULATION DE TRANSACTION
+    # ============================================================
 
     @staticmethod
     @db_transaction.atomic
+    def reverse_transaction(transaction, reversed_by=None, reason=""):
+        """
+        Annule une transaction : inverse les soldes des comptes concernés.
+        """
+        if transaction.is_reversed:
+            raise ValidationError("Cette transaction a déjà été annulée.")
+
+        from_account = transaction.from_account
+        to_account = transaction.to_account
+        amount = transaction.amount
+
+        # Inverser : ce qui a été retiré est remis, ce qui a été ajouté est retiré
+        if from_account:
+            from_account.balance += amount
+            from_account.save()
+        if to_account:
+            to_account.balance -= amount
+            to_account.save()
+
+        reversal = Transaction.objects.create(
+            transaction_type='partner_deletion_reversal',
+            from_account=to_account,
+            to_account=from_account,
+            amount=amount,
+            description=f"Annulation: {reason or 'Annulation'} - Transaction #{transaction.id}",
+            created_by=reversed_by,
+        )
+
+        transaction.is_reversed = True
+        transaction.reversed_at = timezone.now()
+        transaction.reversal_transaction = reversal
+        transaction.save(update_fields=[
+            'is_reversed', 'reversed_at', 'reversal_transaction'])
+
+        return reversal
+
+    # ============================================================
+    # SUPPRESSION PARTENAIRE (LOGIQUE CORRIGÉE)
+    # ============================================================
+
+    @staticmethod
+    @db_transaction.atomic
+    def delete_partner_and_reverse(partner, deleted_by=None, reason="", hard=False):
+        """
+        Supprime un partenaire et RESTAURE les soldes correctement.
+
+        LOGIQUE FINANCIÈRE :
+        --------------------
+        Le solde du partenaire = somme des dépôts reçus - somme des retraits effectués.
+        Ce solde est une "avance" du compte Global.
+
+        À la suppression :
+        - Le compte Global doit RÉCUPÉRER ce solde → Global.balance -= partner_balance
+        - Les comptes agents ne sont PAS touchés (ils ont déjà l'argent en main)
+        - Le compte partenaire est supprimé
+        - Toutes les transactions liées sont supprimées
+        """
+        partner_account = Account.objects.filter(
+            partner=partner, account_type='partner').first()
+
+        # Récupérer le solde du partenaire AVANT tout
+        partner_balance = partner_account.balance if partner_account else Decimal(
+            '0.00')
+
+        # Compter et lister les transactions liées
+        transaction_count = 0
+        total_amount = Decimal('0.00')
+
+        if partner_account:
+            transactions_qs = Transaction.objects.filter(
+                models.Q(from_account=partner_account) |
+                models.Q(to_account=partner_account)
+            )
+            transaction_count = transactions_qs.count()
+            total_amount = transactions_qs.aggregate(
+                models.Sum('amount'))['amount__sum'] or Decimal('0.00')
+
+            # ✅ AJUSTEMENT DU COMPTE GLOBAL
+            # Le global RÉCUPÈRE le solde du partenaire (donc DIMINUE)
+            global_acc = FinanceService.get_global_account()
+            global_acc.balance -= partner_balance
+            global_acc.save()
+            print(
+                f"💰 Global ajusté: {global_acc.balance} (delta: -{partner_balance})")
+
+            # ✅ SUPPRIMER LES TRANSACTIONS (nécessaire pour libérer le compte)
+            transactions_qs.delete()
+            print(f"🗑️ {transaction_count} transaction(s) supprimée(s)")
+
+            # ✅ SUPPRIMER LE COMPTE PARTENAIRE
+            partner_account.delete()
+            print(f"🗑️ Compte partenaire supprimé")
+
+        # ✅ SUPPRIMER LE PARTENAIRE (soft ou hard)
+        if hard:
+            partner.hard_delete()
+        else:
+            partner.delete()
+
+        return {
+            'partner_id': partner.id,
+            'partner_name': partner.name,
+            'transactions_reversed': transaction_count,
+            'total_amount_reversed': total_amount,
+            'partner_balance': partner_balance,
+            'account_deleted': partner_account is not None,
+            'hard_deleted': hard,
+            'message': (
+                f"Partenaire '{partner.name}' supprimé. "
+                f"{transaction_count} transaction(s) supprimée(s). "
+                f"Solde partenaire ({partner_balance} XOF) déduit du compte global. "
+                f"Compte partenaire supprimé."
+            )
+        }
+
+    # ============================================================
+    # MÉTHODES DE CONSULTATION
+    # ============================================================
+
+    @staticmethod
     def get_partner_balance(partner):
         account = Account.objects.filter(
             partner=partner, account_type='partner').first()
         return account.balance if account else Decimal('0.00')
 
     @staticmethod
-    @db_transaction.atomic
     def get_agent_balance(agent_user):
         account = Account.objects.filter(
             user=agent_user, account_type='agent').first()
         return account.balance if account else Decimal('0.00')
 
     @staticmethod
-    @db_transaction.atomic
     def get_global_balance():
         account = FinanceService.get_global_account()
         return account.balance
 
     @staticmethod
-    @db_transaction.atomic
     def get_partner_transactions(partner, limit=100):
-        """Récupère les transactions d'un partenaire."""
         partner_account = Account.objects.filter(
-            partner=partner, account_type='partner'
-        ).first()
-
+            partner=partner, account_type='partner').first()
         if not partner_account:
-            return []
-
-        transactions = Transaction.objects.filter(
+            return Transaction.objects.none()
+        return Transaction.objects.filter(
             models.Q(from_account=partner_account) |
             models.Q(to_account=partner_account)
         ).order_by('-created_at')[:limit]
 
-        return transactions
-
     @staticmethod
-    @db_transaction.atomic
     def get_agent_transactions(agent_user, limit=100):
-        """Récupère les transactions d'un agent."""
         agent_account = Account.objects.filter(
-            user=agent_user, account_type='agent'
-        ).first()
-
+            user=agent_user, account_type='agent').first()
         if not agent_account:
-            return []
-
-        transactions = Transaction.objects.filter(
+            return Transaction.objects.none()
+        return Transaction.objects.filter(
             models.Q(from_account=agent_account) |
             models.Q(to_account=agent_account)
         ).order_by('-created_at')[:limit]
 
-        return transactions
-
     @staticmethod
-    @db_transaction.atomic
     def get_withdrawal_recipient(recipient_id):
-        """Récupère un bénéficiaire par son ID."""
         try:
             return WithdrawalRecipient.objects.get(id=recipient_id)
         except WithdrawalRecipient.DoesNotExist:
             return None
 
     @staticmethod
-    @db_transaction.atomic
     def create_withdrawal_recipient(data):
-        """Crée un nouveau bénéficiaire de retrait."""
-        recipient = WithdrawalRecipient.objects.create(
+        return WithdrawalRecipient.objects.create(
             first_name=data.get('first_name'),
             last_name=data.get('last_name'),
             email=data.get('email', ''),
@@ -275,33 +396,23 @@ class FinanceService:
             is_regular=data.get('is_regular', True),
             notes=data.get('notes', ''),
         )
-        return recipient
 
     @staticmethod
-    @db_transaction.atomic
     def get_withdrawal_stats(partner=None, agent=None, date_from=None, date_to=None):
-        """
-        Récupère les statistiques des retraits.
-        """
-        withdrawals = Transaction.objects.filter(transaction_type='withdrawal')
+        withdrawals = Transaction.objects.filter(
+            transaction_type='withdrawal', is_reversed=False)
 
         if partner:
             partner_account = Account.objects.filter(
-                partner=partner, account_type='partner'
-            ).first()
+                partner=partner, account_type='partner').first()
             if partner_account:
-                withdrawals = withdrawals.filter(
-                    models.Q(from_account=partner_account)
-                )
+                withdrawals = withdrawals.filter(from_account=partner_account)
 
         if agent:
             agent_account = Account.objects.filter(
-                user=agent, account_type='agent'
-            ).first()
+                user=agent, account_type='agent').first()
             if agent_account:
-                withdrawals = withdrawals.filter(
-                    models.Q(to_account=agent_account)
-                )
+                withdrawals = withdrawals.filter(to_account=agent_account)
 
         if date_from:
             withdrawals = withdrawals.filter(created_at__gte=date_from)
@@ -319,23 +430,22 @@ class FinanceService:
         }
 
     @staticmethod
-    @db_transaction.atomic
     def get_system_stats():
-        """
-        Récupère les statistiques générales du système.
-        """
-        total_partners = Partner.objects.count()
+        total_partners = Partner.objects.filter(is_deleted=False).count()
         total_agents = User.objects.filter(role='agent').count()
 
         global_account = FinanceService.get_global_account()
 
-        partner_accounts = Account.objects.filter(account_type='partner')
+        partner_accounts = Account.objects.filter(
+            account_type='partner', partner__is_deleted=False)
         agent_accounts = Account.objects.filter(account_type='agent')
 
-        total_partner_balance = sum(acc.balance for acc in partner_accounts)
-        total_agent_balance = sum(acc.balance for acc in agent_accounts)
+        total_partner_balance = sum(
+            (acc.balance for acc in partner_accounts), Decimal('0.00'))
+        total_agent_balance = sum(
+            (acc.balance for acc in agent_accounts), Decimal('0.00'))
 
-        transactions = Transaction.objects.all()
+        transactions = Transaction.objects.filter(is_reversed=False)
         total_transactions = transactions.count()
 
         deposits = transactions.filter(transaction_type='deposit')
@@ -360,10 +470,13 @@ class FinanceService:
             'transactions': {
                 'total': total_transactions,
                 'deposits': deposits.count(),
-                'deposits_total': deposits.aggregate(models.Sum('amount'))['amount__sum'] or Decimal('0.00'),
+                'deposits_total': deposits.aggregate(
+                    models.Sum('amount'))['amount__sum'] or Decimal('0.00'),
                 'transfers': transfers.count(),
-                'transfers_total': transfers.aggregate(models.Sum('amount'))['amount__sum'] or Decimal('0.00'),
+                'transfers_total': transfers.aggregate(
+                    models.Sum('amount'))['amount__sum'] or Decimal('0.00'),
                 'withdrawals': withdrawals.count(),
-                'withdrawals_total': withdrawals.aggregate(models.Sum('amount'))['amount__sum'] or Decimal('0.00'),
+                'withdrawals_total': withdrawals.aggregate(
+                    models.Sum('amount'))['amount__sum'] or Decimal('0.00'),
             }
         }
