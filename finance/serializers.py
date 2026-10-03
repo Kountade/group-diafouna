@@ -78,6 +78,10 @@ class TransactionSerializer(serializers.ModelSerializer):
     movement_type = serializers.SerializerMethodField()
     movement_label = serializers.SerializerMethodField()
 
+    # ✅ Champs calculés selon l'utilisateur courant
+    is_reversible = serializers.SerializerMethodField()
+    reverse_block_reason = serializers.SerializerMethodField()
+
     class Meta:
         model = Transaction
         fields = '__all__'
@@ -116,7 +120,7 @@ class TransactionSerializer(serializers.ModelSerializer):
             return 'SORTIE'
         elif obj.transaction_type in ('transfer_to_agent', 'transfer_between_agents'):
             return 'TRANSFERT'
-        elif obj.transaction_type == 'partner_deletion_reversal':
+        elif obj.transaction_type in ('reversal', 'partner_deletion_reversal'):
             return 'ANNULATION'
         return obj.transaction_type.upper()
 
@@ -129,9 +133,90 @@ class TransactionSerializer(serializers.ModelSerializer):
             return 'Transfert vers Agent'
         elif obj.transaction_type == 'transfer_between_agents':
             return 'Transfert entre Agents'
+        elif obj.transaction_type == 'reversal':
+            return 'Annulation de transaction'
         elif obj.transaction_type == 'partner_deletion_reversal':
             return 'Annulation (suppression partenaire)'
         return obj.get_transaction_type_display()
+
+    # ────────────────────────────────────────────────────────────
+    # ✅ Permissions calculées côté backend
+    # ────────────────────────────────────────────────────────────
+
+    def _get_agent_account(self, user):
+        """Compte de l'agent connecté (ou None)."""
+        if not user or not user.is_authenticated:
+            return None
+        if getattr(user, 'role', None) != 'agent':
+            return None
+        return Account.objects.filter(
+            user=user, account_type='agent').first()
+
+    def get_is_reversible(self, obj):
+        """Indique si l'utilisateur courant peut annuler cette transaction."""
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return False
+
+        user = request.user
+
+        # Déjà annulée
+        if obj.is_reversed:
+            return False
+        # Type non annulable
+        if obj.transaction_type in Transaction.NON_REVERSIBLE_TYPES:
+            return False
+        # Comptes supprimés
+        if obj.from_account is None and obj.to_account is None:
+            return False
+
+        # Admin : peut tout annuler
+        if getattr(user, 'role', None) == 'admin':
+            return True
+
+        # Agent : seulement si son compte est impliqué
+        if getattr(user, 'role', None) == 'agent':
+            agent_account = self._get_agent_account(user)
+            if not agent_account:
+                return False
+            return (
+                obj.from_account_id == agent_account.id or
+                obj.to_account_id == agent_account.id
+            )
+
+        return False
+
+    def get_reverse_block_reason(self, obj):
+        """Explique pourquoi l'annulation est bloquée (pour tooltip frontend)."""
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return "Non authentifié"
+
+        user = request.user
+
+        if obj.is_reversed:
+            return "Transaction déjà annulée"
+        if obj.transaction_type in Transaction.NON_REVERSIBLE_TYPES:
+            return "Une annulation ne peut pas être annulée"
+        if obj.from_account is None and obj.to_account is None:
+            return "Comptes liés supprimés"
+
+        if getattr(user, 'role', None) == 'admin':
+            return None
+
+        if getattr(user, 'role', None) == 'agent':
+            agent_account = self._get_agent_account(user)
+            if not agent_account:
+                return "Aucun compte agent associé"
+            is_involved = (
+                obj.from_account_id == agent_account.id or
+                obj.to_account_id == agent_account.id
+            )
+            if not is_involved:
+                return "Vous ne pouvez annuler que vos propres transactions"
+            return None
+
+        return "Non autorisé"
 
 
 class DepositSerializer(serializers.Serializer):

@@ -65,7 +65,6 @@ class FinanceService:
         partner_acc = FinanceService.get_or_create_partner_account(partner)
         global_acc = FinanceService.get_global_account()
 
-        # ✅ CORRECTION : Le global DIMINUE
         global_acc.balance -= amount
         partner_acc.balance += amount
         global_acc.save()
@@ -83,7 +82,7 @@ class FinanceService:
 
     @staticmethod
     @db_transaction.atomic
-    def transfer_to_agent(agent_user, amount, description=""):
+    def transfer_to_agent(agent_user, amount, description="", created_by=None):
         """Transfert Global → Agent : Global DIMINUE, Agent AUGMENTE"""
         amount = Decimal(str(amount))
         if amount <= 0:
@@ -107,7 +106,7 @@ class FinanceService:
             to_account=agent_acc,
             amount=amount,
             description=description,
-            created_by=agent_user
+            created_by=created_by
         )
         return agent_acc.balance
 
@@ -163,13 +162,11 @@ class FinanceService:
         partner_acc = FinanceService.get_or_create_partner_account(partner)
         agent_acc = FinanceService.get_or_create_agent_account(agent_user)
 
-        # ✅ CORRECTION : L'agent AUGMENTE (il reçoit l'argent du partenaire)
         partner_acc.balance -= amount
         agent_acc.balance += amount
         partner_acc.save()
         agent_acc.save()
 
-        # Gestion du bénéficiaire
         recipient = None
         recipient_name = None
         recipient_phone = None
@@ -220,32 +217,55 @@ class FinanceService:
     @db_transaction.atomic
     def reverse_transaction(transaction, reversed_by=None, reason=""):
         """
-        Annule une transaction : inverse les soldes des comptes concernés.
+        Annule n'importe quelle transaction en restaurant les soldes.
+
+        ⚠️ SOLUTION 1 : AUCUNE vérification de solde.
+        Le compte débité peut devenir négatif si l'argent a déjà été utilisé.
+        C'est à l'appelant (vue) de gérer les permissions, et à l'admin de
+        corriger ensuite via un ajustement si nécessaire.
         """
+        # ── Vérifications de base ───────────────────────────────
         if transaction.is_reversed:
             raise ValidationError("Cette transaction a déjà été annulée.")
+
+        if transaction.transaction_type in Transaction.NON_REVERSIBLE_TYPES:
+            raise ValidationError(
+                f"Une transaction de type "
+                f"'{transaction.get_transaction_type_display()}' "
+                f"ne peut pas être annulée."
+            )
 
         from_account = transaction.from_account
         to_account = transaction.to_account
         amount = transaction.amount
 
-        # Inverser : ce qui a été retiré est remis, ce qui a été ajouté est retiré
+        if from_account is None and to_account is None:
+            raise ValidationError(
+                "Impossible d'annuler : les comptes liés ont été supprimés.")
+
+        # ── Inversion des soldes (SANS vérification de solde) ───
         if from_account:
             from_account.balance += amount
-            from_account.save()
+            from_account.save(update_fields=['balance', 'updated_at'])
         if to_account:
             to_account.balance -= amount
-            to_account.save()
+            to_account.save(update_fields=['balance', 'updated_at'])
 
+        # ── Création de la transaction d'annulation ─────────────
         reversal = Transaction.objects.create(
-            transaction_type='partner_deletion_reversal',
+            transaction_type='reversal',
             from_account=to_account,
             to_account=from_account,
             amount=amount,
-            description=f"Annulation: {reason or 'Annulation'} - Transaction #{transaction.id}",
+            description=(
+                f"Annulation de la transaction #{transaction.id} "
+                f"({transaction.get_transaction_type_display()})"
+                + (f" — Motif : {reason}" if reason else "")
+            ),
             created_by=reversed_by,
         )
 
+        # ── Marquage de la transaction originale ────────────────
         transaction.is_reversed = True
         transaction.reversed_at = timezone.now()
         transaction.reversal_transaction = reversal
@@ -255,7 +275,7 @@ class FinanceService:
         return reversal
 
     # ============================================================
-    # SUPPRESSION PARTENAIRE (LOGIQUE CORRIGÉE)
+    # SUPPRESSION PARTENAIRE
     # ============================================================
 
     @staticmethod
@@ -270,7 +290,7 @@ class FinanceService:
         Ce solde est une "avance" du compte Global.
 
         À la suppression :
-        - Le compte Global doit RÉCUPÉRER ce solde → Global.balance -= partner_balance
+        - Le compte Global RÉCUPÈRE ce solde → Global.balance -= partner_balance
         - Les comptes agents ne sont PAS touchés (ils ont déjà l'argent en main)
         - Le compte partenaire est supprimé
         - Toutes les transactions liées sont supprimées
@@ -278,11 +298,9 @@ class FinanceService:
         partner_account = Account.objects.filter(
             partner=partner, account_type='partner').first()
 
-        # Récupérer le solde du partenaire AVANT tout
         partner_balance = partner_account.balance if partner_account else Decimal(
             '0.00')
 
-        # Compter et lister les transactions liées
         transaction_count = 0
         total_amount = Decimal('0.00')
 
@@ -296,20 +314,15 @@ class FinanceService:
                 models.Sum('amount'))['amount__sum'] or Decimal('0.00')
 
             # ✅ AJUSTEMENT DU COMPTE GLOBAL
-            # Le global RÉCUPÈRE le solde du partenaire (donc DIMINUE)
             global_acc = FinanceService.get_global_account()
             global_acc.balance -= partner_balance
             global_acc.save()
-            print(
-                f"💰 Global ajusté: {global_acc.balance} (delta: -{partner_balance})")
 
-            # ✅ SUPPRIMER LES TRANSACTIONS (nécessaire pour libérer le compte)
+            # ✅ SUPPRIMER LES TRANSACTIONS
             transactions_qs.delete()
-            print(f"🗑️ {transaction_count} transaction(s) supprimée(s)")
 
             # ✅ SUPPRIMER LE COMPTE PARTENAIRE
             partner_account.delete()
-            print(f"🗑️ Compte partenaire supprimé")
 
         # ✅ SUPPRIMER LE PARTENAIRE (soft ou hard)
         if hard:

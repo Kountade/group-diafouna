@@ -123,7 +123,8 @@ class PartnerViewSet(viewsets.ModelViewSet):
             except ValueError:
                 pass
 
-        return Response(TransactionSerializer(transactions, many=True).data)
+        return Response(TransactionSerializer(
+            transactions, many=True, context={'request': request}).data)
 
     @action(detail=True, methods=['get'], url_path='account')
     def partner_account(self, request, pk=None):
@@ -345,7 +346,8 @@ class TransactionViewSet(viewsets.ReadOnlyModelViewSet):
             new_balance = FinanceService.transfer_to_agent(
                 agent,
                 serializer.validated_data['amount'],
-                serializer.validated_data.get('description', ''))
+                serializer.validated_data.get('description', ''),
+                created_by=request.user)
             return Response({
                 "message": "Transfert effectué",
                 "agent_balance": new_balance})
@@ -461,35 +463,72 @@ class TransactionViewSet(viewsets.ReadOnlyModelViewSet):
         except Exception as e:
             return Response({"error": str(e)}, status=400)
 
+    # ✅✅✅ MÉTHODE CORRIGÉE : autorise les agents sur leurs propres transactions
     @action(detail=True, methods=['post'], url_path='reverse')
     def reverse_transaction(self, request, pk=None):
-        """Annule une transaction manuellement"""
-        if request.user.role != 'admin':
-            return Response({"error": "Seul un admin peut annuler"},
-                            status=status.HTTP_403_FORBIDDEN)
+        """
+        Annule une transaction.
+        - Admin : peut annuler N'IMPORTE QUELLE transaction
+        - Agent : peut annuler UNIQUEMENT les transactions où son compte est impliqué
+        """
+        user = request.user
 
         try:
             transaction = Transaction.objects.get(pk=pk)
         except Transaction.DoesNotExist:
-            return Response({"error": "Transaction non trouvée"},
-                            status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"error": "Transaction non trouvée"},
+                status=status.HTTP_404_NOT_FOUND)
 
+        # ── Vérification des permissions ────────────────────────
+        if user.role == 'admin':
+            pass  # L'admin peut tout annuler
+        elif user.role == 'agent':
+            agent_account = Account.objects.filter(
+                user=user, account_type='agent').first()
+            if not agent_account:
+                return Response(
+                    {"error": "Aucun compte agent trouvé pour cet utilisateur."},
+                    status=status.HTTP_403_FORBIDDEN)
+
+            is_involved = (
+                transaction.from_account_id == agent_account.id or
+                transaction.to_account_id == agent_account.id
+            )
+            if not is_involved:
+                return Response(
+                    {"error": "Vous ne pouvez annuler que vos propres transactions."},
+                    status=status.HTTP_403_FORBIDDEN)
+        else:
+            return Response(
+                {"error": "Non autorisé"},
+                status=status.HTTP_403_FORBIDDEN)
+
+        # ── Vérifications métier ────────────────────────────────
         if transaction.is_reversed:
-            return Response({"error": "Transaction déjà annulée"},
-                            status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "Cette transaction a déjà été annulée."},
+                status=status.HTTP_400_BAD_REQUEST)
 
+        # ── Annulation ──────────────────────────────────────────
         try:
             reversal = FinanceService.reverse_transaction(
                 transaction,
-                reversed_by=request.user,
+                reversed_by=user,
                 reason=request.data.get('reason', ''))
             return Response({
-                "message": "Transaction annulée",
+                "message": "Transaction annulée avec succès",
                 "original_transaction_id": transaction.id,
                 "reversal_transaction_id": reversal.id,
                 "amount_reversed": str(transaction.amount)})
         except ValidationError as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": str(e)},
+                status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response(
+                {"error": f"Erreur lors de l'annulation: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @action(detail=False, methods=['get'], url_path='partner-balance')
     def partner_balance(self, request):
@@ -561,7 +600,8 @@ class TransactionViewSet(viewsets.ReadOnlyModelViewSet):
                 pass
 
         if request.query_params.get('simple') == 'true':
-            serializer = WithdrawalRecipientSimpleSerializer(queryset, many=True)
+            serializer = WithdrawalRecipientSimpleSerializer(
+                queryset, many=True)
         else:
             serializer = WithdrawalRecipientSerializer(queryset, many=True)
         return Response(serializer.data)
@@ -715,7 +755,8 @@ class TransactionViewSet(viewsets.ReadOnlyModelViewSet):
         return Response({
             "partner": {"id": partner.id, "name": partner.name,
                         "balance": partner_account.balance},
-            "transactions": TransactionSerializer(transactions, many=True).data,
+            "transactions": TransactionSerializer(
+                transactions, many=True, context={'request': request}).data,
             "count": transactions.count()})
 
 

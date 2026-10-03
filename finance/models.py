@@ -124,8 +124,12 @@ class Transaction(models.Model):
         ('transfer_to_agent', 'Transfert vers Agent'),
         ('withdrawal', 'SORTIE'),
         ('transfer_between_agents', 'Transfert entre Agents'),
+        ('reversal', 'Annulation de transaction'),
         ('partner_deletion_reversal', 'Annulation suppression partenaire'),
     )
+
+    # ✅ Types non annulables (on n'annule pas une annulation)
+    NON_REVERSIBLE_TYPES = ('reversal', 'partner_deletion_reversal')
 
     transaction_type = models.CharField(
         max_length=30, choices=TRANSACTION_TYPES)
