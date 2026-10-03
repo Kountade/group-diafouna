@@ -463,13 +463,14 @@ class TransactionViewSet(viewsets.ReadOnlyModelViewSet):
         except Exception as e:
             return Response({"error": str(e)}, status=400)
 
-    # ✅✅✅ MÉTHODE CORRIGÉE : autorise les agents sur leurs propres transactions
+    # ✅✅✅ MÉTHODE CORRIGÉE : SEUL L'ÉMETTEUR PEUT ANNULER
     @action(detail=True, methods=['post'], url_path='reverse')
     def reverse_transaction(self, request, pk=None):
         """
         Annule une transaction.
         - Admin : peut annuler N'IMPORTE QUELLE transaction
-        - Agent : peut annuler UNIQUEMENT les transactions où son compte est impliqué
+        - Agent : peut annuler UNIQUEMENT les transactions qu'il a ÉMISES
+                  (c'est-à-dire où son compte est en from_account)
         """
         user = request.user
 
@@ -491,13 +492,12 @@ class TransactionViewSet(viewsets.ReadOnlyModelViewSet):
                     {"error": "Aucun compte agent trouvé pour cet utilisateur."},
                     status=status.HTTP_403_FORBIDDEN)
 
-            is_involved = (
-                transaction.from_account_id == agent_account.id or
-                transaction.to_account_id == agent_account.id
-            )
-            if not is_involved:
+            # ✅ SEUL L'ÉMETTEUR peut annuler
+            # from_account = source de l'argent (celui qui a ENVOYÉ)
+            if transaction.from_account_id != agent_account.id:
                 return Response(
-                    {"error": "Vous ne pouvez annuler que vos propres transactions."},
+                    {"error": "Vous ne pouvez annuler que les transactions "
+                              "que vous avez émises."},
                     status=status.HTTP_403_FORBIDDEN)
         else:
             return Response(

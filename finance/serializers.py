@@ -153,7 +153,11 @@ class TransactionSerializer(serializers.ModelSerializer):
             user=user, account_type='agent').first()
 
     def get_is_reversible(self, obj):
-        """Indique si l'utilisateur courant peut annuler cette transaction."""
+        """
+        Indique si l'utilisateur courant peut annuler cette transaction.
+        - Admin : tout
+        - Agent : SEULEMENT s'il est l'ÉMETTEUR (from_account)
+        """
         request = self.context.get('request')
         if not request or not request.user.is_authenticated:
             return False
@@ -174,15 +178,12 @@ class TransactionSerializer(serializers.ModelSerializer):
         if getattr(user, 'role', None) == 'admin':
             return True
 
-        # Agent : seulement si son compte est impliqué
+        # Agent : ✅ SEULEMENT s'il est l'ÉMETTEUR (from_account)
         if getattr(user, 'role', None) == 'agent':
             agent_account = self._get_agent_account(user)
             if not agent_account:
                 return False
-            return (
-                obj.from_account_id == agent_account.id or
-                obj.to_account_id == agent_account.id
-            )
+            return obj.from_account_id == agent_account.id
 
         return False
 
@@ -208,12 +209,9 @@ class TransactionSerializer(serializers.ModelSerializer):
             agent_account = self._get_agent_account(user)
             if not agent_account:
                 return "Aucun compte agent associé"
-            is_involved = (
-                obj.from_account_id == agent_account.id or
-                obj.to_account_id == agent_account.id
-            )
-            if not is_involved:
-                return "Vous ne pouvez annuler que vos propres transactions"
+            # ✅ SEUL l'émetteur peut annuler
+            if obj.from_account_id != agent_account.id:
+                return "Vous ne pouvez annuler que les transactions que vous avez émises"
             return None
 
         return "Non autorisé"
