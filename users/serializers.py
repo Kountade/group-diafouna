@@ -1,0 +1,85 @@
+# users/serializers.py
+from rest_framework import serializers
+from django.contrib.auth import get_user_model
+from .models import CustomUser
+
+User = get_user_model()
+
+
+class LoginSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    password = serializers.CharField()
+
+
+class RegisterSerializer(serializers.ModelSerializer):
+    role = serializers.ChoiceField(
+        choices=CustomUser.ROLE_CHOICES, required=False
+    )
+
+    class Meta:
+        model = User
+        fields = ('id', 'email', 'password', 'role', 'first_name', 'last_name',
+                  'username', 'phone_number', 'address', 'birthday')
+        extra_kwargs = {
+            'password': {'write_only': True},
+            'role': {'required': False}
+        }
+
+    def create(self, validated_data):
+        if 'role' not in validated_data:
+            validated_data['role'] = 'agent'
+        user = User.objects.create_user(**validated_data)
+        return user
+
+
+class UserSerializer(serializers.ModelSerializer):
+    """Sérialiseur de lecture pour la liste des utilisateurs."""
+    class Meta:
+        model = User
+        fields = (
+            'id', 'email', 'username', 'role', 'first_name', 'last_name',
+            'phone_number', 'address', 'birthday', 'is_active',
+            'profile_picture', 'created_at', 'last_login', 'is_online',
+            'date_joined'
+        )
+        read_only_fields = fields
+
+
+class UserDetailSerializer(serializers.ModelSerializer):
+    """Sérialiseur de lecture détaillée."""
+    class Meta:
+        model = User
+        fields = '__all__'
+        read_only_fields = ('id', 'created_at', 'updated_at',
+                            'last_login', 'date_joined')
+
+
+class UserWriteSerializer(serializers.ModelSerializer):
+    """
+    Sérialiseur pour la création et modification d'utilisateurs.
+    """
+    password = serializers.CharField(write_only=True, required=False)
+
+    class Meta:
+        model = User
+        fields = [
+            'email', 'password', 'username', 'role',
+            'first_name', 'last_name', 'phone_number', 'address',
+            'birthday', 'is_active', 'profile_picture'
+        ]
+
+    def create(self, validated_data):
+        password = validated_data.pop('password', None)
+        user = super().create(validated_data)
+        if password:
+            user.set_password(password)
+            user.save()
+        return user
+
+    def update(self, instance, validated_data):
+        password = validated_data.pop('password', None)
+        user = super().update(instance, validated_data)
+        if password:
+            user.set_password(password)
+            user.save()
+        return user
