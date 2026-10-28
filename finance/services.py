@@ -1,5 +1,6 @@
 # finances/services.py
 from decimal import Decimal
+
 from django.db import transaction as db_transaction
 from django.core.exceptions import ValidationError
 from django.utils import timezone
@@ -12,6 +13,69 @@ User = get_user_model()
 
 
 class FinanceService:
+
+    # ============================================================
+    # HELPERS INTERNES — Toute écriture de solde passe par ici
+    # ============================================================
+
+    @staticmethod
+    def _check_positive(amount):
+        """Valide qu'un montant est strictement positif."""
+        amount = Decimal(str(amount))
+        if amount <= 0:
+            raise ValidationError("Le montant doit être positif.")
+        return amount
+
+    @staticmethod
+    def _credit(account, amount):
+        """Crédite un compte (aucun risque de négatif)."""
+        account.balance += amount
+        account.save(update_fields=['balance', 'updated_at'])
+
+    @staticmethod
+    def _debit(account, amount):
+        """
+        Débite un compte en REFUSANT tout solde négatif.
+        Utilisé pour Global, Partner, et pour les débits Agent
+        qui NE sont PAS des retraits partenaire (ex : transfert agent→agent).
+        """
+        if account.balance < amount:
+            raise ValidationError(
+                f"Solde insuffisant sur '{account}'. "
+                f"Solde actuel: {account.balance} {account.currency}, "
+                f"demandé: {amount} {account.currency}")
+        account.balance -= amount
+        account.save(update_fields=['balance', 'updated_at'])
+
+    @staticmethod
+    def _debit_allow_negative(account, amount):
+        """
+        Débite un compte SANS vérifier le solde.
+        ⚠️ Réservé EXCLUSIVEMENT aux comptes agent, dans le cadre
+        d'un retrait partenaire (l'agent avance le cash au bénéficiaire
+        même s'il n'a pas la trésorerie suffisante).
+        Le découvert est tracé et sera comblé par un futur
+        approvisionnement de l'admin (transfer_to_agent).
+        """
+        if account.account_type != 'agent':
+            raise ValidationError(
+                "Le découvert n'est autorisé que pour les comptes agent.")
+        account.balance -= amount
+        account.save(update_fields=['balance', 'updated_at'])
+
+    @staticmethod
+    def _debit_or_zero(account, amount):
+        """
+        Débite un compte sans jamais le rendre négatif.
+        Si le solde est insuffisant, met le solde à zéro et retourne
+        le montant effectivement débité (peut être < amount).
+        Utilisé uniquement pour des cas exceptionnels (ex : suppression
+        d'un partenaire quand le Global n'a pas assez pour rembourser).
+        """
+        debited = min(account.balance, amount)
+        account.balance -= debited
+        account.save(update_fields=['balance', 'updated_at'])
+        return debited
 
     # ============================================================
     # COMPTES
@@ -44,6 +108,31 @@ class FinanceService:
         return account
 
     # ============================================================
+    # APPROVISIONNEMENT DU GLOBAL
+    # ============================================================
+
+    @staticmethod
+    @db_transaction.atomic
+    def topup_global(amount, description="", created_by=None):
+        """
+        Approvisionne le compte Global (trésor de l'entreprise).
+        Entrée externe : le Global est crédité, aucun débit interne.
+        """
+        amount = FinanceService._check_positive(amount)
+        global_acc = FinanceService.get_global_account()
+        FinanceService._credit(global_acc, amount)
+
+        Transaction.objects.create(
+            transaction_type='company_topup',
+            from_account=None,
+            to_account=global_acc,
+            amount=amount,
+            description=description or "Approvisionnement compte global",
+            created_by=created_by,
+        )
+        return global_acc.balance
+
+    # ============================================================
     # OPÉRATIONS FINANCIÈRES
     # ============================================================
 
@@ -52,12 +141,14 @@ class FinanceService:
     def deposit_partner(partner, amount, description="", created_by=None):
         """
         DÉPÔT Partenaire (ENTRÉE) :
-        - Compte Global : DIMINUE (le global donne l'argent)
-        - Compte Partenaire : AUGMENTE (le partenaire reçoit)
+        Le partenaire apporte du cash au système.
+        - Partenaire : +amount
+        - Global     : +amount
+
+        AUCUN DÉBIT → ni le Global ni le Partenaire ne peuvent
+        devenir négatifs ici.
         """
-        amount = Decimal(str(amount))
-        if amount <= 0:
-            raise ValidationError("Le montant doit être positif.")
+        amount = FinanceService._check_positive(amount)
 
         if partner.is_deleted:
             raise ValidationError("Ce partenaire est supprimé.")
@@ -65,14 +156,13 @@ class FinanceService:
         partner_acc = FinanceService.get_or_create_partner_account(partner)
         global_acc = FinanceService.get_global_account()
 
-        global_acc.balance -= amount
-        partner_acc.balance += amount
-        global_acc.save()
-        partner_acc.save()
+        # ✅ Les DEUX comptes CRÉDITENT (entrée externe d'argent)
+        FinanceService._credit(partner_acc, amount)
+        FinanceService._credit(global_acc, amount)
 
         Transaction.objects.create(
             transaction_type='deposit',
-            from_account=global_acc,
+            from_account=None,          # entrée externe : aucun compte source
             to_account=partner_acc,
             amount=amount,
             description=description,
@@ -83,22 +173,18 @@ class FinanceService:
     @staticmethod
     @db_transaction.atomic
     def transfer_to_agent(agent_user, amount, description="", created_by=None):
-        """Transfert Global → Agent : Global DIMINUE, Agent AUGMENTE"""
-        amount = Decimal(str(amount))
-        if amount <= 0:
-            raise ValidationError("Montant invalide.")
+        """
+        Transfert Global → Agent :
+        - Global : −amount (vérifié — ne peut pas passer négatif)
+        - Agent  : +amount (crédit, peut sortir du découvert)
+        """
+        amount = FinanceService._check_positive(amount)
 
         global_acc = FinanceService.get_global_account()
         agent_acc = FinanceService.get_or_create_agent_account(agent_user)
 
-        if global_acc.balance < amount:
-            raise ValidationError(
-                f"Solde global insuffisant. Solde actuel: {global_acc.balance} XOF")
-
-        global_acc.balance -= amount
-        agent_acc.balance += amount
-        global_acc.save()
-        agent_acc.save()
+        FinanceService._debit(global_acc, amount)
+        FinanceService._credit(agent_acc, amount)
 
         Transaction.objects.create(
             transaction_type='transfer_to_agent',
@@ -106,17 +192,19 @@ class FinanceService:
             to_account=agent_acc,
             amount=amount,
             description=description,
-            created_by=created_by
+            created_by=created_by,
         )
         return agent_acc.balance
 
     @staticmethod
     @db_transaction.atomic
     def transfer_between_agents(from_agent, to_agent, amount, description=""):
-        """Transfert Agent → Agent : source DIMINUE, destination AUGMENTE"""
-        amount = Decimal(str(amount))
-        if amount <= 0:
-            raise ValidationError("Le montant doit être positif.")
+        """
+        Transfert Agent → Agent :
+        - Source      : −amount (vérifié — pas de découvert ici)
+        - Destination : +amount
+        """
+        amount = FinanceService._check_positive(amount)
 
         if from_agent.id == to_agent.id:
             raise ValidationError(
@@ -125,14 +213,10 @@ class FinanceService:
         from_acc = FinanceService.get_or_create_agent_account(from_agent)
         to_acc = FinanceService.get_or_create_agent_account(to_agent)
 
-        if from_acc.balance < amount:
-            raise ValidationError(
-                f"Solde insuffisant. Solde actuel: {from_acc.balance} {from_acc.currency}")
-
-        from_acc.balance -= amount
-        to_acc.balance += amount
-        from_acc.save()
-        to_acc.save()
+        # ✅ Ici on REFUSE le découvert : un agent ne peut pas transférer
+        #    plus qu'il ne possède.
+        FinanceService._debit(from_acc, amount)
+        FinanceService._credit(to_acc, amount)
 
         transaction = Transaction.objects.create(
             transaction_type='transfer_between_agents',
@@ -140,27 +224,25 @@ class FinanceService:
             to_account=to_acc,
             amount=amount,
             description=description,
-            created_by=from_agent
+            created_by=from_agent,
         )
         return from_acc.balance, transaction
 
     @staticmethod
     @db_transaction.atomic
-    def withdraw_partner_via_agent(partner, agent_user, amount, description="", recipient_data=None):
+    def withdraw_partner_via_agent(partner, agent_user, amount,
+                                   description="", recipient_data=None):
         """
         RETRAIT Partenaire (SORTIE) :
-        - Compte Partenaire : DIMINUE (le partenaire retire son argent)
-        - Compte Agent : DIMINUE (l'agent débite son compte pour remettre
-          l'argent au bénéficiaire)
+        - Partenaire : −amount (vérifié — ne peut JAMAIS passer négatif)
+        - Agent      : −amount (découvert AUTORISÉ — l'agent avance
+                       le cash au bénéficiaire même s'il n'a pas assez
+                       en caisse ; son solde peut devenir négatif et
+                       sera comblé par un futur transfer_to_agent).
 
-        LOGIQUE FINANCIÈRE :
-        --------------------
-        L'agent est un intermédiaire qui AVANCE l'argent liquide au bénéficiaire.
-        Son compte doit donc être DÉBITÉ du montant, pas crédité.
+        L'argent sort du système (le bénéficiaire repart avec le cash).
         """
-        amount = Decimal(str(amount))
-        if amount <= 0:
-            raise ValidationError("Le montant doit être positif.")
+        amount = FinanceService._check_positive(amount)
 
         if partner.is_deleted:
             raise ValidationError("Ce partenaire est supprimé.")
@@ -168,24 +250,13 @@ class FinanceService:
         partner_acc = FinanceService.get_or_create_partner_account(partner)
         agent_acc = FinanceService.get_or_create_agent_account(agent_user)
 
-        # ✅ Vérifier le solde du partenaire
-        if partner_acc.balance < amount:
-            raise ValidationError(
-                f"Solde partenaire insuffisant. "
-                f"Solde actuel: {partner_acc.balance} {partner_acc.currency}")
+        # ✅ Partenaire : débit STRICT (jamais de négatif)
+        FinanceService._debit(partner_acc, amount)
 
-        # ✅ Vérifier le solde de l'agent (il doit avoir l'argent en caisse)
-        if agent_acc.balance < amount:
-            raise ValidationError(
-                f"Solde agent insuffisant. "
-                f"Solde actuel: {agent_acc.balance} {agent_acc.currency}")
+        # ✅ Agent : débit SANS vérification (découvert autorisé)
+        FinanceService._debit_allow_negative(agent_acc, amount)
 
-        # ✅ CORRECTION : le partenaire ET l'agent sont DÉBITÉS
-        partner_acc.balance -= amount
-        agent_acc.balance -= amount
-        partner_acc.save()
-        agent_acc.save()
-
+        # ── Gestion du bénéficiaire ──
         recipient = None
         recipient_name = None
         recipient_phone = None
@@ -218,7 +289,7 @@ class FinanceService:
         transaction = Transaction.objects.create(
             transaction_type='withdrawal',
             from_account=partner_acc,
-            to_account=agent_acc,  # conservé pour traçabilité (même si débité)
+            to_account=agent_acc,
             amount=amount,
             description=description,
             created_by=agent_user,
@@ -236,23 +307,19 @@ class FinanceService:
     @db_transaction.atomic
     def reverse_transaction(transaction, reversed_by=None, reason=""):
         """
-        Annule n'importe quelle transaction en restaurant les soldes.
+        Annule une transaction en appliquant l'INVERSE EXACT de l'opération
+        d'origine.
 
-        ⚠️ SOLUTION 1 : AUCUNE vérification de solde.
-        Le compte débité peut devenir négatif si l'argent a déjà été utilisé.
-        C'est à l'appelant (vue) de gérer les permissions, et à l'admin de
-        corriger ensuite via un ajustement si nécessaire.
+        - deposit      : Partner +, Global +   → Partner −, Global − (vérifiés)
+        - transfer_to_agent : Global −, Agent + → Global +, Agent −
+        - withdrawal   : Partner −, Agent −    → Partner +, Agent + (crédits)
+        - transfer_between_agents : Source −, Dest + → Source +, Dest −
+        - company_topup : Global +             → Global − (vérifié)
 
-        ⚠️ CAS SPÉCIAL 'withdrawal' :
-        -----------------------------
-        Lors d'un retrait, DEUX comptes ont été débités :
-          - Compte partenaire (-amount)
-          - Compte agent (-amount)
-        L'annulation doit donc CRÉDITER les deux comptes :
-          - Compte partenaire (+amount)
-          - Compte agent (+amount)
+        ⚠️ L'annulation d'un dépôt DÉBITE le Global et le Partenaire.
+        Si l'un des deux n'a pas les fonds, l'annulation est refusée
+        (impossible de rendre ces comptes négatifs).
         """
-        # ── Vérifications de base ───────────────────────────────
         if transaction.is_reversed:
             raise ValidationError("Cette transaction a déjà été annulée.")
 
@@ -271,26 +338,52 @@ class FinanceService:
             raise ValidationError(
                 "Impossible d'annuler : les comptes liés ont été supprimés.")
 
-        # ── Inversion des soldes (SANS vérification de solde) ───
-        if transaction.transaction_type == 'withdrawal':
-            # ✅ CAS SPÉCIAL : les DEUX comptes avaient été DÉBITÉS
-            # → on les CRÉDITE tous les deux
-            if from_account:
-                from_account.balance += amount
-                from_account.save(update_fields=['balance', 'updated_at'])
-            if to_account:
-                to_account.balance += amount
-                to_account.save(update_fields=['balance', 'updated_at'])
-        else:
-            # Comportement standard (deposit, transfert, etc.)
-            if from_account:
-                from_account.balance += amount
-                from_account.save(update_fields=['balance', 'updated_at'])
-            if to_account:
-                to_account.balance -= amount
-                to_account.save(update_fields=['balance', 'updated_at'])
+        tx_type = transaction.transaction_type
 
-        # ── Création de la transaction d'annulation ─────────────
+        # ── Inversion selon le type d'origine ──
+        if tx_type == 'deposit':
+            # Dépôt : Partner +, Global + → inverse : Partner −, Global −
+            global_acc = FinanceService.get_global_account()
+            FinanceService._debit(global_acc, amount)   # vérifié
+            if to_account:
+                FinanceService._debit(to_account, amount)  # vérifié
+
+        elif tx_type == 'transfer_to_agent':
+            # Global −, Agent + → inverse : Global +, Agent −
+            if from_account:
+                FinanceService._credit(from_account, amount)
+            if to_account:
+                # L'agent peut être débité, mais ici on REFUSE le découvert :
+                # annuler un transfert ne doit pas plonger l'agent dans le rouge.
+                FinanceService._debit(to_account, amount)
+
+        elif tx_type == 'withdrawal':
+            # Partner −, Agent − → inverse : Partner +, Agent +
+            if from_account:
+                FinanceService._credit(from_account, amount)
+            if to_account:
+                FinanceService._credit(to_account, amount)
+
+        elif tx_type == 'transfer_between_agents':
+            # Source −, Dest + → inverse : Source +, Dest −
+            if from_account:
+                FinanceService._credit(from_account, amount)
+            if to_account:
+                FinanceService._debit(to_account, amount)
+
+        elif tx_type == 'company_topup':
+            # Global + → inverse : Global − (vérifié)
+            if to_account:
+                FinanceService._debit(to_account, amount)
+
+        else:
+            # Fallback générique (ne devrait pas arriver)
+            if from_account:
+                FinanceService._credit(from_account, amount)
+            if to_account:
+                FinanceService._debit(to_account, amount)
+
+        # ── Création de la transaction d'annulation ──
         reversal = Transaction.objects.create(
             transaction_type='reversal',
             from_account=to_account,
@@ -304,7 +397,7 @@ class FinanceService:
             created_by=reversed_by,
         )
 
-        # ── Marquage de la transaction originale ────────────────
+        # ── Marquage de la transaction originale ──
         transaction.is_reversed = True
         transaction.reversed_at = timezone.now()
         transaction.reversal_transaction = reversal
@@ -319,29 +412,26 @@ class FinanceService:
 
     @staticmethod
     @db_transaction.atomic
-    def delete_partner_and_reverse(partner, deleted_by=None, reason="", hard=False):
+    def delete_partner_and_reverse(partner, deleted_by=None, reason="",
+                                   hard=False):
         """
         Supprime un partenaire et RESTAURE les soldes correctement.
 
-        LOGIQUE FINANCIÈRE :
-        --------------------
-        Le solde du partenaire = somme des dépôts reçus - somme des retraits effectués.
-        Ce solde est une "avance" du compte Global.
-
-        À la suppression :
-        - Le compte Global RÉCUPÈRE ce solde → Global.balance -= partner_balance
-        - Les comptes agents ne sont PAS touchés (ils ont déjà l'argent en main)
-        - Le compte partenaire est supprimé
-        - Toutes les transactions liées sont supprimées
+        Le solde du partenaire est REMBOURSÉ au compte Global
+        (puisque lors du dépôt, le Global avait été crédité du même montant).
+        Si le Global n'a pas assez pour rembourser intégralement,
+        il est mis à zéro (le reste est considéré comme perte exceptionnelle).
         """
         partner_account = Account.objects.filter(
             partner=partner, account_type='partner').first()
 
-        partner_balance = partner_account.balance if partner_account else Decimal(
-            '0.00')
+        partner_balance = (
+            partner_account.balance if partner_account else Decimal('0.00'))
 
         transaction_count = 0
         total_amount = Decimal('0.00')
+        refunded = Decimal('0.00')
+        shortfall = Decimal('0.00')
 
         if partner_account:
             transactions_qs = Transaction.objects.filter(
@@ -352,22 +442,32 @@ class FinanceService:
             total_amount = transactions_qs.aggregate(
                 models.Sum('amount'))['amount__sum'] or Decimal('0.00')
 
-            # ✅ AJUSTEMENT DU COMPTE GLOBAL
-            global_acc = FinanceService.get_global_account()
-            global_acc.balance -= partner_balance
-            global_acc.save()
+            # ✅ REMBOURSEMENT du solde partenaire au Global
+            if partner_balance > 0:
+                global_acc = FinanceService.get_global_account()
+                refunded = FinanceService._debit_or_zero(
+                    global_acc, partner_balance)
+                shortfall = partner_balance - refunded
 
-            # ✅ SUPPRIMER LES TRANSACTIONS
             transactions_qs.delete()
-
-            # ✅ SUPPRIMER LE COMPTE PARTENAIRE
             partner_account.delete()
 
-        # ✅ SUPPRIMER LE PARTENAIRE (soft ou hard)
         if hard:
             partner.hard_delete()
         else:
             partner.delete()
+
+        message = (
+            f"Partenaire '{partner.name}' supprimé. "
+            f"{transaction_count} transaction(s) supprimée(s). "
+            f"Solde partenaire ({partner_balance} XOF)."
+        )
+        if refunded > 0:
+            message += f" Remboursé au Global : {refunded} XOF."
+        if shortfall > 0:
+            message += (
+                f" ⚠️ Manque {shortfall} XOF (Global insuffisant, "
+                f"traité comme perte exceptionnelle).")
 
         return {
             'partner_id': partner.id,
@@ -375,14 +475,71 @@ class FinanceService:
             'transactions_reversed': transaction_count,
             'total_amount_reversed': total_amount,
             'partner_balance': partner_balance,
+            'refunded_to_global': refunded,
+            'shortfall': shortfall,
             'account_deleted': partner_account is not None,
             'hard_deleted': hard,
-            'message': (
-                f"Partenaire '{partner.name}' supprimé. "
-                f"{transaction_count} transaction(s) supprimée(s). "
-                f"Solde partenaire ({partner_balance} XOF) déduit du compte global. "
-                f"Compte partenaire supprimé."
-            )
+            'message': message,
+        }
+
+    # ============================================================
+    # CONTRÔLE D'INTÉGRITÉ
+    # ============================================================
+
+    @staticmethod
+    def verify_integrity():
+        """
+        Vérifie la cohérence des soldes.
+
+        - Les comptes Global et Partenaire ne doivent JAMAIS être négatifs.
+        - Les comptes Agent PEUVENT être négatifs (découvert autorisé
+          en cas de retrait partenaire). On les liste séparément.
+        """
+        accounts = Account.objects.all()
+
+        forbidden_negatives = [
+            {
+                'id': a.id,
+                'label': str(a),
+                'account_type': a.account_type,
+                'balance': str(a.balance),
+            }
+            for a in accounts
+            if a.balance < 0 and a.account_type != 'agent'
+        ]
+
+        agents_in_overdraft = [
+            {
+                'id': a.id,
+                'label': str(a),
+                'balance': str(a.balance),
+                'overdraft': str(-a.balance),
+            }
+            for a in accounts.filter(account_type='agent', balance__lt=0)
+        ]
+
+        overdraft_total = sum(
+            (-a.balance for a in accounts.filter(
+                account_type='agent', balance__lt=0)),
+            Decimal('0.00'))
+
+        global_bal = FinanceService.get_global_balance()
+        partner_total = sum(
+            (a.balance for a in accounts.filter(account_type='partner')),
+            Decimal('0.00'))
+        agent_total = sum(
+            (a.balance for a in accounts.filter(account_type='agent')),
+            Decimal('0.00'))
+
+        return {
+            'has_forbidden_negatives': len(forbidden_negatives) > 0,
+            'forbidden_negative_accounts': forbidden_negatives,
+            'agents_in_overdraft': agents_in_overdraft,
+            'overdraft_total': str(overdraft_total),
+            'global': str(global_bal),
+            'partners_total': str(partner_total),
+            'agents_total': str(agent_total),
+            'internal_total': str(global_bal + partner_total + agent_total),
         }
 
     # ============================================================
@@ -450,7 +607,8 @@ class FinanceService:
         )
 
     @staticmethod
-    def get_withdrawal_stats(partner=None, agent=None, date_from=None, date_to=None):
+    def get_withdrawal_stats(partner=None, agent=None,
+                             date_from=None, date_to=None):
         withdrawals = Transaction.objects.filter(
             transaction_type='withdrawal', is_reversed=False)
 
@@ -478,7 +636,9 @@ class FinanceService:
         return {
             'total_count': total_count,
             'total_amount': total_amount,
-            'average_amount': total_amount / total_count if total_count > 0 else Decimal('0.00')
+            'average_amount': (
+                total_amount / total_count
+                if total_count > 0 else Decimal('0.00'))
         }
 
     @staticmethod
@@ -503,6 +663,12 @@ class FinanceService:
         deposits = transactions.filter(transaction_type='deposit')
         transfers = transactions.filter(transaction_type='transfer_to_agent')
         withdrawals = transactions.filter(transaction_type='withdrawal')
+        topups = transactions.filter(transaction_type='company_topup')
+
+        agents_in_overdraft_qs = agent_accounts.filter(balance__lt=0)
+        overdraft_total = sum(
+            (-acc.balance for acc in agents_in_overdraft_qs),
+            Decimal('0.00'))
 
         return {
             'partners': {
@@ -513,11 +679,14 @@ class FinanceService:
             'agents': {
                 'total': total_agents,
                 'total_balance': total_agent_balance,
-                'active': agent_accounts.filter(balance__gt=0).count()
+                'active': agent_accounts.filter(balance__gt=0).count(),
+                'in_overdraft': agents_in_overdraft_qs.count(),
+                'overdraft_total': overdraft_total,
             },
             'global_account': {
                 'balance': global_account.balance,
-                'currency': global_account.currency
+                'currency': global_account.currency,
+                'is_negative': global_account.balance < 0,
             },
             'transactions': {
                 'total': total_transactions,
@@ -529,6 +698,9 @@ class FinanceService:
                     models.Sum('amount'))['amount__sum'] or Decimal('0.00'),
                 'withdrawals': withdrawals.count(),
                 'withdrawals_total': withdrawals.aggregate(
+                    models.Sum('amount'))['amount__sum'] or Decimal('0.00'),
+                'topups': topups.count(),
+                'topups_total': topups.aggregate(
                     models.Sum('amount'))['amount__sum'] or Decimal('0.00'),
             }
         }
