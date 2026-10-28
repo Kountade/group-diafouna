@@ -61,22 +61,24 @@ class Partner(models.Model):
 class Account(models.Model):
     """
     Compte financier. Trois types :
-      - global  : trésor de l'entreprise (alimenté par company_topup)
-      - partner : compte d'un partenaire
-      - agent   : compte d'un agent
+      - global  : trésor de l'entreprise (JAMAIS négatif)
+      - partner : compte d'un partenaire (peut être négatif en cas de retrait)
+      - agent   : compte d'un agent (peut être négatif en cas de retrait)
 
     INVARIANTS :
       - Global   : solde >= 0 TOUJOURS
-      - Partner  : solde >= 0 TOUJOURS
-      - Agent    : solde >= 0 SAUF en cas de retrait partenaire
-                   (l'agent avance le cash au bénéficiaire, son compte
-                   peut passer en découvert, à combler par un
-                   réapprovisionnement de l'admin).
+      - Partner  : solde >= 0 SAUF lors d'un retrait
+                   (le partenaire peut retirer plus que son solde,
+                   il comble son découvert par un futur dépôt)
+      - Agent    : solde >= 0 SAUF lors d'un retrait
+                   (l'agent avance le cash au bénéficiaire)
 
     Garanties à deux niveaux :
-      1. FinanceService : _debit() vérifie, _debit_allow_negative()
-                          n'est autorisé QUE pour les agents.
-      2. Base de données : contrainte balance_non_negative_unless_agent.
+      1. FinanceService : _debit() vérifie (Global, transferts agent→agent,
+                          annulations) ; _debit_allow_negative() n'est
+                          autorisé QUE pour partner et agent, dans le
+                          cadre strict d'un retrait.
+      2. Base de données : contrainte balance_non_negative_except_partner_and_agent.
     """
     ACCOUNT_TYPES = (
         ('global', 'Compte Global Entreprise'),
@@ -96,7 +98,7 @@ class Account(models.Model):
     balance = models.DecimalField(
         max_digits=15, decimal_places=2, default=Decimal('0.00'),
         # NOTE : MinValueValidator retiré — la contrainte BDD scopée
-        # gère le contrôle, et les agents peuvent être négatifs.
+        # gère le contrôle, et partner/agent peuvent être négatifs.
         verbose_name="Solde")
     currency = models.CharField(max_length=3, default='XOF')
 
@@ -125,15 +127,14 @@ class Account(models.Model):
                 ),
                 name='valid_account_ownership'
             ),
-            # ✅ Solde non négatif SAUF pour les agents (découvert autorisé
-            #    uniquement en cas de retrait partenaire — contrôle métier
-            #    assuré par FinanceService).
+            # ✅ Solde non négatif SAUF pour partner et agent.
+            #    Le Global ne peut JAMAIS être négatif.
             models.CheckConstraint(
                 check=(
                     models.Q(balance__gte=0)
-                    | models.Q(account_type='agent')
+                    | models.Q(account_type__in=['partner', 'agent'])
                 ),
-                name='balance_non_negative_unless_agent'
+                name='balance_non_negative_except_partner_and_agent'
             ),
         ]
         indexes = [
@@ -172,21 +173,21 @@ class Account(models.Model):
 
     def save(self, *args, **kwargs):
         """
-        Refuse un solde négatif SAUF pour un compte agent.
-        (Double sécurité avec la contrainte BDD scopée.)
+        Refuse un solde négatif SAUF pour un compte partner ou agent.
+        (Double sécurité avec la contrainte BDD.)
+        Le Global ne peut JAMAIS être négatif.
         """
         if (self.balance is not None
                 and self.balance < 0
-                and self.account_type != 'agent'):
+                and self.account_type == 'global'):
             raise ValidationError(
-                f"Le solde ne peut pas être négatif pour un compte "
-                f"'{self.account_type}' "
+                f"Le solde d'un compte global ne peut pas être négatif "
                 f"(tentative : {self.balance} {self.currency}).")
         super().save(*args, **kwargs)
 
     @property
     def is_in_overdraft(self):
-        """True si le compte est en découvert (possible uniquement pour un agent)."""
+        """True si le compte est en découvert (uniquement partner ou agent)."""
         return self.balance < 0
 
 
@@ -251,7 +252,8 @@ class Transaction(models.Model):
       - company_topup          : crédit du Global (entrée externe)
       - deposit                : Partner + et Global + (entrée externe)
       - transfer_to_agent      : Global → Agent
-      - withdrawal             : Partner → Agent (l'agent peut passer négatif)
+      - withdrawal             : Partner → Agent
+                                 (partner et agent peuvent passer négatifs)
       - transfer_between_agents: Agent → Agent
       - reversal               : annulation (inverse une transaction)
       - partner_deletion_reversal : annulation lors suppression partenaire

@@ -36,8 +36,10 @@ class FinanceService:
     def _debit(account, amount):
         """
         Débite un compte en REFUSANT tout solde négatif.
-        Utilisé pour Global, Partner, et pour les débits Agent
-        qui NE sont PAS des retraits partenaire (ex : transfert agent→agent).
+        Utilisé pour :
+          - Global (toujours)
+          - Partner et Agent pour les débits qui NE sont PAS un retrait
+            (ex : transfert agent→agent, annulation de transfert)
         """
         if account.balance < amount:
             raise ValidationError(
@@ -51,15 +53,15 @@ class FinanceService:
     def _debit_allow_negative(account, amount):
         """
         Débite un compte SANS vérifier le solde.
-        ⚠️ Réservé EXCLUSIVEMENT aux comptes agent, dans le cadre
-        d'un retrait partenaire (l'agent avance le cash au bénéficiaire
-        même s'il n'a pas la trésorerie suffisante).
-        Le découvert est tracé et sera comblé par un futur
-        approvisionnement de l'admin (transfer_to_agent).
+        ⚠️ Réservé EXCLUSIVEMENT aux comptes partner et agent,
+        dans le cadre d'un retrait partenaire (le partenaire peut retirer
+        plus que son solde, l'agent avance le cash au bénéficiaire).
+        Le Global ne peut JAMAIS être négatif, même par cette voie.
         """
-        if account.account_type != 'agent':
+        if account.account_type not in ('partner', 'agent'):
             raise ValidationError(
-                "Le découvert n'est autorisé que pour les comptes agent.")
+                "Le découvert n'est autorisé que pour les comptes "
+                "partenaire et agent.")
         account.balance -= amount
         account.save(update_fields=['balance', 'updated_at'])
 
@@ -142,7 +144,7 @@ class FinanceService:
         """
         DÉPÔT Partenaire (ENTRÉE) :
         Le partenaire apporte du cash au système.
-        - Partenaire : +amount
+        - Partenaire : +amount (peut sortir du découvert)
         - Global     : +amount
 
         AUCUN DÉBIT → ni le Global ni le Partenaire ne peuvent
@@ -234,12 +236,15 @@ class FinanceService:
                                    description="", recipient_data=None):
         """
         RETRAIT Partenaire (SORTIE) :
-        - Partenaire : −amount (vérifié — ne peut JAMAIS passer négatif)
-        - Agent      : −amount (découvert AUTORISÉ — l'agent avance
-                       le cash au bénéficiaire même s'il n'a pas assez
-                       en caisse ; son solde peut devenir négatif et
-                       sera comblé par un futur transfer_to_agent).
+        - Partenaire : −amount (DÉCOUVERT AUTORISÉ — le partenaire peut
+                       retirer plus que son solde, son compte passe
+                       en négatif ; il comblera par un futur dépôt)
+        - Agent      : −amount (DÉCOUVERT AUTORISÉ — l'agent avance le
+                       cash au bénéficiaire même s'il n'a pas assez
+                       en caisse)
 
+        AUCUNE vérification de solde sur ces deux comptes.
+        Le Global n'est PAS touché.
         L'argent sort du système (le bénéficiaire repart avec le cash).
         """
         amount = FinanceService._check_positive(amount)
@@ -250,10 +255,10 @@ class FinanceService:
         partner_acc = FinanceService.get_or_create_partner_account(partner)
         agent_acc = FinanceService.get_or_create_agent_account(agent_user)
 
-        # ✅ Partenaire : débit STRICT (jamais de négatif)
-        FinanceService._debit(partner_acc, amount)
+        # ✅ Partenaire : découvert AUTORISÉ
+        FinanceService._debit_allow_negative(partner_acc, amount)
 
-        # ✅ Agent : débit SANS vérification (découvert autorisé)
+        # ✅ Agent : découvert AUTORISÉ
         FinanceService._debit_allow_negative(agent_acc, amount)
 
         # ── Gestion du bénéficiaire ──
@@ -310,15 +315,14 @@ class FinanceService:
         Annule une transaction en appliquant l'INVERSE EXACT de l'opération
         d'origine.
 
-        - deposit      : Partner +, Global +   → Partner −, Global − (vérifiés)
-        - transfer_to_agent : Global −, Agent + → Global +, Agent −
-        - withdrawal   : Partner −, Agent −    → Partner +, Agent + (crédits)
-        - transfer_between_agents : Source −, Dest + → Source +, Dest −
-        - company_topup : Global +             → Global − (vérifié)
+        - deposit               : Partner +, Global +     → Partner −, Global − (vérifiés)
+        - transfer_to_agent     : Global −, Agent +       → Global +, Agent − (vérifiés)
+        - withdrawal            : Partner −, Agent −      → Partner +, Agent + (crédits)
+        - transfer_between_agents : Source −, Dest +      → Source +, Dest − (vérifiés)
+        - company_topup         : Global +                → Global − (vérifié)
 
         ⚠️ L'annulation d'un dépôt DÉBITE le Global et le Partenaire.
-        Si l'un des deux n'a pas les fonds, l'annulation est refusée
-        (impossible de rendre ces comptes négatifs).
+        Si l'un des deux n'a pas les fonds, l'annulation est refusée.
         """
         if transaction.is_reversed:
             raise ValidationError("Cette transaction a déjà été annulée.")
@@ -353,8 +357,8 @@ class FinanceService:
             if from_account:
                 FinanceService._credit(from_account, amount)
             if to_account:
-                # L'agent peut être débité, mais ici on REFUSE le découvert :
-                # annuler un transfert ne doit pas plonger l'agent dans le rouge.
+                # On REFUSE le découvert ici : annuler un transfert ne doit
+                # pas plonger l'agent dans le rouge.
                 FinanceService._debit(to_account, amount)
 
         elif tx_type == 'withdrawal':
@@ -417,10 +421,16 @@ class FinanceService:
         """
         Supprime un partenaire et RESTAURE les soldes correctement.
 
-        Le solde du partenaire est REMBOURSÉ au compte Global
-        (puisque lors du dépôt, le Global avait été crédité du même montant).
-        Si le Global n'a pas assez pour rembourser intégralement,
-        il est mis à zéro (le reste est considéré comme perte exceptionnelle).
+        Cas 1 — Partenaire avec solde POSITIF :
+            Le solde est remboursé au Global (débit Global, vérifié).
+        Cas 2 — Partenaire avec solde NÉGATIF (découvert) :
+            Le découvert est ANNULÉ en créditant le Global du montant
+            (le Global reprend ce qu'il avait "avancé" en trop).
+
+        Puis :
+            - Les transactions liées sont supprimées.
+            - Le compte partenaire est supprimé.
+            - Le partenaire est soft-deleted (ou hard-deleted).
         """
         partner_account = Account.objects.filter(
             partner=partner, account_type='partner').first()
@@ -432,6 +442,7 @@ class FinanceService:
         total_amount = Decimal('0.00')
         refunded = Decimal('0.00')
         shortfall = Decimal('0.00')
+        overdraft_cleared = Decimal('0.00')
 
         if partner_account:
             transactions_qs = Transaction.objects.filter(
@@ -442,12 +453,19 @@ class FinanceService:
             total_amount = transactions_qs.aggregate(
                 models.Sum('amount'))['amount__sum'] or Decimal('0.00')
 
-            # ✅ REMBOURSEMENT du solde partenaire au Global
+            global_acc = FinanceService.get_global_account()
+
             if partner_balance > 0:
-                global_acc = FinanceService.get_global_account()
+                # ✅ Remboursement du solde partenaire au Global
                 refunded = FinanceService._debit_or_zero(
                     global_acc, partner_balance)
                 shortfall = partner_balance - refunded
+
+            elif partner_balance < 0:
+                # ✅ Découvert partenaire → on crédite le Global du montant
+                #    (le Global récupère l'avance qu'il avait faite en trop)
+                overdraft_cleared = -partner_balance
+                FinanceService._credit(global_acc, overdraft_cleared)
 
             transactions_qs.delete()
             partner_account.delete()
@@ -460,7 +478,8 @@ class FinanceService:
         message = (
             f"Partenaire '{partner.name}' supprimé. "
             f"{transaction_count} transaction(s) supprimée(s). "
-            f"Solde partenaire ({partner_balance} XOF)."
+            f"Solde partenaire au moment de la suppression : "
+            f"{partner_balance} XOF."
         )
         if refunded > 0:
             message += f" Remboursé au Global : {refunded} XOF."
@@ -468,6 +487,10 @@ class FinanceService:
             message += (
                 f" ⚠️ Manque {shortfall} XOF (Global insuffisant, "
                 f"traité comme perte exceptionnelle).")
+        if overdraft_cleared > 0:
+            message += (
+                f" Découvert de {overdraft_cleared} XOF annulé "
+                f"(crédité au Global).")
 
         return {
             'partner_id': partner.id,
@@ -477,6 +500,7 @@ class FinanceService:
             'partner_balance': partner_balance,
             'refunded_to_global': refunded,
             'shortfall': shortfall,
+            'overdraft_cleared': overdraft_cleared,
             'account_deleted': partner_account is not None,
             'hard_deleted': hard,
             'message': message,
@@ -491,9 +515,9 @@ class FinanceService:
         """
         Vérifie la cohérence des soldes.
 
-        - Les comptes Global et Partenaire ne doivent JAMAIS être négatifs.
-        - Les comptes Agent PEUVENT être négatifs (découvert autorisé
-          en cas de retrait partenaire). On les liste séparément.
+        - Global   : ne doit JAMAIS être négatif.
+        - Partner  : peut être négatif (découvert autorisé en retrait).
+        - Agent    : peut être négatif (découvert autorisé en retrait).
         """
         accounts = Account.objects.all()
 
@@ -505,7 +529,17 @@ class FinanceService:
                 'balance': str(a.balance),
             }
             for a in accounts
-            if a.balance < 0 and a.account_type != 'agent'
+            if a.balance < 0 and a.account_type == 'global'
+        ]
+
+        partners_in_overdraft = [
+            {
+                'id': a.id,
+                'label': str(a),
+                'balance': str(a.balance),
+                'overdraft': str(-a.balance),
+            }
+            for a in accounts.filter(account_type='partner', balance__lt=0)
         ]
 
         agents_in_overdraft = [
@@ -518,7 +552,11 @@ class FinanceService:
             for a in accounts.filter(account_type='agent', balance__lt=0)
         ]
 
-        overdraft_total = sum(
+        partner_overdraft_total = sum(
+            (-a.balance for a in accounts.filter(
+                account_type='partner', balance__lt=0)),
+            Decimal('0.00'))
+        agent_overdraft_total = sum(
             (-a.balance for a in accounts.filter(
                 account_type='agent', balance__lt=0)),
             Decimal('0.00'))
@@ -534,8 +572,10 @@ class FinanceService:
         return {
             'has_forbidden_negatives': len(forbidden_negatives) > 0,
             'forbidden_negative_accounts': forbidden_negatives,
+            'partners_in_overdraft': partners_in_overdraft,
+            'partner_overdraft_total': str(partner_overdraft_total),
             'agents_in_overdraft': agents_in_overdraft,
-            'overdraft_total': str(overdraft_total),
+            'agent_overdraft_total': str(agent_overdraft_total),
             'global': str(global_bal),
             'partners_total': str(partner_total),
             'agents_total': str(agent_total),
@@ -657,6 +697,16 @@ class FinanceService:
         total_agent_balance = sum(
             (acc.balance for acc in agent_accounts), Decimal('0.00'))
 
+        partners_in_overdraft_qs = partner_accounts.filter(balance__lt=0)
+        agents_in_overdraft_qs = agent_accounts.filter(balance__lt=0)
+
+        partner_overdraft_total = sum(
+            (-acc.balance for acc in partners_in_overdraft_qs),
+            Decimal('0.00'))
+        agent_overdraft_total = sum(
+            (-acc.balance for acc in agents_in_overdraft_qs),
+            Decimal('0.00'))
+
         transactions = Transaction.objects.filter(is_reversed=False)
         total_transactions = transactions.count()
 
@@ -665,23 +715,20 @@ class FinanceService:
         withdrawals = transactions.filter(transaction_type='withdrawal')
         topups = transactions.filter(transaction_type='company_topup')
 
-        agents_in_overdraft_qs = agent_accounts.filter(balance__lt=0)
-        overdraft_total = sum(
-            (-acc.balance for acc in agents_in_overdraft_qs),
-            Decimal('0.00'))
-
         return {
             'partners': {
                 'total': total_partners,
                 'total_balance': total_partner_balance,
-                'active': partner_accounts.filter(balance__gt=0).count()
+                'active': partner_accounts.filter(balance__gt=0).count(),
+                'in_overdraft': partners_in_overdraft_qs.count(),
+                'overdraft_total': partner_overdraft_total,
             },
             'agents': {
                 'total': total_agents,
                 'total_balance': total_agent_balance,
                 'active': agent_accounts.filter(balance__gt=0).count(),
                 'in_overdraft': agents_in_overdraft_qs.count(),
-                'overdraft_total': overdraft_total,
+                'overdraft_total': agent_overdraft_total,
             },
             'global_account': {
                 'balance': global_account.balance,
